@@ -12,45 +12,61 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
   import {
     getFirestore, collection, addDoc, query, where, orderBy, limit,
-    getDocs, serverTimestamp, Timestamp
+    getDocs, serverTimestamp, Timestamp, doc, getDoc
   } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
   // ============================================================
   // ⚠️ عدّل الإعدادات دي بقيم مشروع Firebase بتاعك (من لوحة تحكم Firebase)
   // ============================================================
   const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_PROJECT.firebaseapp.com",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_PROJECT.appspot.com",
-    messagingSenderId: "YOUR_SENDER_ID",
-    appId: "YOUR_APP_ID"
+    apiKey: "AIzaSyBGSGTSL-lVdx54BIECEbbVljXuqCjuu_4",
+    authDomain: "attendance-terra.firebaseapp.com",
+    projectId: "attendance-terra",
+    storageBucket: "attendance-terra.firebasestorage.app",
+    messagingSenderId: "403868956775",
+    appId: "1:403868956775:web:1cefb35a53c72033057cc2"
   };
 
-  // قائمة الموظفين — عدّل الأسماء هنا
-  const EMPLOYEES = [
+  // قائمة موظفين احتياطية (تُستخدم فقط لو فشل تحميل القائمة من قاعدة البيانات)
+  const FALLBACK_EMPLOYEES = [
     "يويو", "Hagoraa", "Nermin", "Y", "eldeeb", "اسلام الشربيني", "جمعه انور محمد"
   ];
 
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
   const EVENTS_COLLECTION = "attendance_events";
+  const CONFIG_DOC = doc(db, "app_config", "employees");
 
   // ---------------------------------------------------------------
-  // بناء واجهة اختيار الموظف
+  // تحميل قائمة الموظفين من قاعدة البيانات (تُدار من صفحة admin.html)
   // ---------------------------------------------------------------
   const employeeSelect = document.getElementById("employeeSelect");
-  EMPLOYEES.forEach((name) => {
-    const opt = document.createElement("option");
-    opt.value = name;
-    opt.textContent = name;
-    employeeSelect.appendChild(opt);
-  });
 
-  // استرجاع آخر موظف مُختار (تسهيل الاستخدام اليومي)
-  const savedEmployee = localStorage.getItem("lastEmployee");
-  if (savedEmployee && EMPLOYEES.includes(savedEmployee)) {
-    employeeSelect.value = savedEmployee;
+  async function loadEmployeeList() {
+    let names = FALLBACK_EMPLOYEES;
+    try {
+      const snap = await getDoc(CONFIG_DOC);
+      if (snap.exists() && Array.isArray(snap.data().names) && snap.data().names.length > 0) {
+        names = snap.data().names;
+      }
+    } catch (err) {
+      console.error("تعذر تحميل قائمة الموظفين، سيتم استخدام القائمة الاحتياطية", err);
+    }
+
+    employeeSelect.innerHTML = `<option value="" disabled selected>اختر اسمك من القائمة</option>`;
+    names.forEach((name) => {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      employeeSelect.appendChild(opt);
+    });
+
+    // استرجاع آخر موظف مُختار (تسهيل الاستخدام اليومي)
+    const savedEmployee = localStorage.getItem("lastEmployee");
+    if (savedEmployee && names.includes(savedEmployee)) {
+      employeeSelect.value = savedEmployee;
+      loadLastAction(savedEmployee);
+    }
   }
 
   const statusEl = document.getElementById("status");
@@ -137,8 +153,8 @@
   checkOutBtn.addEventListener("click", () => recordEvent("check_out"));
   employeeSelect.addEventListener("change", () => loadLastAction(employeeSelect.value));
 
-  // تحميل آخر حدث للموظف المختار مسبقًا عند فتح الصفحة
-  if (employeeSelect.value) loadLastAction(employeeSelect.value);
+  // تحميل قائمة الموظفين من قاعدة البيانات عند فتح الصفحة
+  loadEmployeeList();
 
   // تحديث الساعة الحية
   const clockEl = document.getElementById("clock");

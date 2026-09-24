@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>إدارة الموظفين — تعليمات الترعة</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBGSGTSL-lVdx54BIECEbbVljXuqCjuu_4",
+    authDomain: "attendance-terra.firebaseapp.com",
+    projectId: "attendance-terra",
+    storageBucket: "attendance-terra.firebasestorage.app",
+    messagingSenderId: "403868956775",
+    appId: "1:403868956775:web:1cefb35a53c72033057cc2"
+  };
+
+  // ⚠️ كلمة سر صفحة الإدارة — لو عايز تغيّرها، بدّل القيمة هنا
+  const ADMIN_PASSWORD = "sweethome2026";
+
+  // أسماء افتراضية أول مرة بس (لو القائمة في القاعدة لسه فاضية)
+  const DEFAULT_EMPLOYEES = [
+    "يويو", "Hagoraa", "Nermin", "Y", "eldeeb", "اسلام الشربيني", "جمعه انور محمد"
+  ];
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const CONFIG_DOC = doc(db, "app_config", "employees");
+
+  // ---------------------------------------------------------------
+  // شاشة الدخول بكلمة السر
+  // ---------------------------------------------------------------
+  const loginScreen = document.getElementById("loginScreen");
+  const adminScreen = document.getElementById("adminScreen");
+  const passwordInput = document.getElementById("passwordInput");
+  const loginBtn = document.getElementById("loginBtn");
+  const loginError = document.getElementById("loginError");
+
+  loginBtn.addEventListener("click", tryLogin);
+  passwordInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") tryLogin();
+  });
+
+  function tryLogin() {
+    if (passwordInput.value === ADMIN_PASSWORD) {
+      loginScreen.style.display = "none";
+      adminScreen.style.display = "block";
+      loadEmployees();
+    } else {
+      loginError.textContent = "كلمة السر غير صحيحة";
+      loginError.classList.add("show");
+      passwordInput.value = "";
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // إدارة قائمة الموظفين
+  // ---------------------------------------------------------------
+  const employeeList = document.getElementById("employeeList");
+  const newNameInput = document.getElementById("newNameInput");
+  const addBtn = document.getElementById("addBtn");
+  const saveStatus = document.getElementById("saveStatus");
+
+  let currentEmployees = [];
+
+  async function loadEmployees() {
+    employeeList.innerHTML = `<div class="loading">جاري التحميل...</div>`;
+    try {
+      const snap = await getDoc(CONFIG_DOC);
+      if (snap.exists() && Array.isArray(snap.data().names)) {
+        currentEmployees = snap.data().names;
+      } else {
+        // أول مرة: نستخدم القائمة الافتراضية ونحفظها
+        currentEmployees = [...DEFAULT_EMPLOYEES];
+        await saveEmployees(false);
+      }
+    } catch (err) {
+      console.error(err);
+      currentEmployees = [...DEFAULT_EMPLOYEES];
+    }
+    renderList();
+  }
+
+  function renderList() {
+    if (currentEmployees.length === 0) {
+      employeeList.innerHTML = `<div class="empty">لا يوجد موظفين مضافين بعد</div>`;
+      return;
+    }
+    employeeList.innerHTML = "";
+    currentEmployees.forEach((name, index) => {
+      const row = document.createElement("div");
+      row.className = "employee-row";
+      row.innerHTML = `
+        <span class="employee-name">${escapeHtml(name)}</span>
+        <button class="delete-btn" data-index="${index}">حذف</button>
+      `;
+      employeeList.appendChild(row);
+    });
+
+    document.querySelectorAll(".delete-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idx = parseInt(btn.dataset.index, 10);
+        const name = currentEmployees[idx];
+        if (confirm(`متأكد إنك عايز تمسح "${name}"؟`)) {
+          currentEmployees.splice(idx, 1);
+          renderList();
+          saveEmployees(true);
+        }
+      });
+    });
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  async function addEmployee() {
+    const name = newNameInput.value.trim();
+    if (!name) return;
+    if (currentEmployees.includes(name)) {
+      showStatus("الاسم ده موجود بالفعل", "error");
+      return;
+    }
+    currentEmployees.push(name);
+    newNameInput.value = "";
+    renderList();
+    await saveEmployees(true);
+  }
+
+  async function saveEmployees(showMessage) {
+    try {
+      await setDoc(CONFIG_DOC, { names: currentEmployees, updatedAt: new Date().toISOString() });
+      if (showMessage) showStatus("تم الحفظ بنجاح", "success");
+    } catch (err) {
+      console.error(err);
+      if (showMessage) showStatus("حصل خطأ في الحفظ، حاول تاني", "error");
+    }
+  }
+
+  function showStatus(message, kind) {
+    saveStatus.textContent = message;
+    saveStatus.className = "save-status show " + kind;
+    setTimeout(() => saveStatus.classList.remove("show"), 2500);
+  }
+
+  addBtn.addEventListener("click", addEmployee);
+  newNameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addEmployee();
+  });
+</script>
+
+<style>
+  :root {
+    --bg: #1f2a24;
+    --surface: #2a362e;
+    --surface-raised: #344139;
+    --paper: #f5f1e8;
+    --paper-dim: #cfc9b8;
+    --sage: #8fa876;
+    --sage-bright: #a4c187;
+    --clay: #c97b5b;
+    --clay-bright: #db8d6c;
+    --line: #3f4d43;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--paper);
+    font-family: "Cairo", "Segoe UI", sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+  }
+
+  .card {
+    width: 100%;
+    max-width: 440px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 32px 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 800;
+    margin: 0 0 24px;
+  }
+
+  label {
+    display: block;
+    font-size: 14px;
+    color: var(--paper-dim);
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+
+  input[type="password"], input[type="text"] {
+    width: 100%;
+    padding: 14px 16px;
+    font-size: 16px;
+    font-family: inherit;
+    color: var(--paper);
+    background: var(--surface-raised);
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+    margin-bottom: 12px;
+  }
+  input:focus { outline: none; border-color: var(--sage); }
+
+  button {
+    font-family: inherit;
+    font-weight: 700;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+  }
+
+  #loginBtn {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    background: var(--sage);
+    color: #16201a;
+  }
+  #loginBtn:hover { filter: brightness(1.08); }
+
+  .error-msg {
+    color: var(--clay-bright);
+    font-size: 13px;
+    font-weight: 700;
+    margin-top: 4px;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .error-msg.show { opacity: 1; }
+
+  #adminScreen { display: none; }
+
+  .add-row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .add-row input { margin-bottom: 0; flex: 1; }
+  .add-row button {
+    padding: 0 20px;
+    background: var(--sage);
+    color: #16201a;
+    font-size: 15px;
+    white-space: nowrap;
+  }
+  .add-row button:hover { filter: brightness(1.08); }
+
+  .employee-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .employee-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    background: var(--surface-raised);
+    border-radius: 10px;
+    border: 1px solid var(--line);
+  }
+
+  .employee-name {
+    font-weight: 700;
+    font-size: 15px;
+  }
+
+  .delete-btn {
+    padding: 8px 14px;
+    background: rgba(201,123,91,0.18);
+    color: var(--clay-bright);
+    font-size: 13px;
+  }
+  .delete-btn:hover { background: rgba(201,123,91,0.3); }
+
+  .loading, .empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--paper-dim);
+    font-size: 14px;
+  }
+
+  .save-status {
+    text-align: center;
+    padding: 10px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    opacity: 0;
+    max-height: 0;
+    overflow: hidden;
+    transition: opacity 0.25s, max-height 0.25s;
+  }
+  .save-status.show { opacity: 1; max-height: 50px; margin-top: 8px; }
+  .save-status.success { background: rgba(143,168,118,0.18); color: var(--sage-bright); }
+  .save-status.error { background: rgba(201,123,91,0.18); color: var(--clay-bright); }
+
+  .back-link {
+    display: block;
+    text-align: center;
+    margin-top: 20px;
+    color: var(--paper-dim);
+    font-size: 13px;
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+
+  <div id="loginScreen" class="card">
+    <h1>🔒 إدارة الموظفين</h1>
+    <label for="passwordInput">كلمة السر</label>
+    <input type="password" id="passwordInput" placeholder="ادخل كلمة السر">
+    <div class="error-msg" id="loginError"></div>
+    <button id="loginBtn" style="margin-top: 12px;">دخول</button>
+  </div>
+
+  <div id="adminScreen" class="card">
+    <h1>إدارة أسماء الموظفين</h1>
+
+    <div class="add-row">
+      <input type="text" id="newNameInput" placeholder="اسم موظف جديد">
+      <button id="addBtn">إضافة</button>
+    </div>
+
+    <div class="employee-list" id="employeeList"></div>
+    <div class="save-status" id="saveStatus"></div>
+
+    <a href="index.html" class="back-link">→ الرجوع لصفحة تسجيل الحضور</a>
+  </div>
+
+</body>
+</html>
