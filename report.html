@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>تقرير الحضور — تعليمات الترعة</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getFirestore, collection, query, orderBy, getDocs
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  // ⚠️ نفس إعدادات Firebase المستخدمة في index.html
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  const DEFAULT_WORK_HOURS = 8; // ساعات مفترضة لو مفيش انصراف مسجل
+  const WEEK_START_DAY = 6; // السبت
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const EVENTS_COLLECTION = "attendance_events";
+
+  const tableBody = document.getElementById("tableBody");
+  const loadingEl = document.getElementById("loading");
+  const emptyEl = document.getElementById("empty");
+  const exportBtn = document.getElementById("exportBtn");
+
+  let weeklySummaryCache = [];
+
+  function toDay(date) {
+    return date.toISOString().slice(0, 10);
+  }
+
+  function getWeekStart(date) {
+    const d = new Date(date);
+    const day = d.getDay();
+    let diff = day - WEEK_START_DAY;
+    if (diff < 0) diff += 7;
+    d.setDate(d.getDate() - diff);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  async function loadEvents() {
+    const q = query(collection(db, EVENTS_COLLECTION), orderBy("timestamp", "asc"));
+    const snap = await getDocs(q);
+    const events = [];
+    snap.forEach((doc) => {
+      const data = doc.data();
+      const ts = data.timestamp ? data.timestamp.toDate() : new Date(data.clientTime);
+      events.push({ employeeName: data.employeeName, type: data.type, timestamp: ts });
+    });
+    return events;
+  }
+
+  function buildDailyRecords(events) {
+    const byEmployee = {};
+    for (const e of events) {
+      if (!byEmployee[e.employeeName]) byEmployee[e.employeeName] = [];
+      byEmployee[e.employeeName].push(e);
+    }
+
+    const dailyRecords = [];
+
+    for (const name of Object.keys(byEmployee)) {
+      const empEvents = byEmployee[name].sort((a, b) => a.timestamp - b.timestamp);
+      const byDay = {};
+      for (const ev of empEvents) {
+        const day = toDay(ev.timestamp);
+        if (!byDay[day]) byDay[day] = [];
+        byDay[day].push(ev);
+      }
+
+      for (const day of Object.keys(byDay)) {
+        const dayEvents = byDay[day];
+        const checkIn = dayEvents.find((e) => e.type === "check_in");
+        const checkOuts = dayEvents.filter((e) => e.type === "check_out");
+        const checkOut = checkOuts.length ? checkOuts[checkOuts.length - 1] : null;
+
+        if (!checkIn) continue;
+
+        let hours, isEstimated;
+        if (checkOut) {
+          hours = (checkOut.timestamp - checkIn.timestamp) / 3600000;
+          isEstimated = false;
+        } else {
+          hours = DEFAULT_WORK_HOURS;
+          isEstimated = true;
+        }
+
+        dailyRecords.push({
+          employeeName: name,
+          date: day,
+          checkIn: checkIn.timestamp,
+          checkOut: checkOut ? checkOut.timestamp : null,
+          hours: Math.round(hours * 100) / 100,
+          isEstimated
+        });
+      }
+    }
+    return dailyRecords;
+  }
+
+  function buildWeeklySummary(dailyRecords) {
+    const weekMap = {};
+    for (const rec of dailyRecords) {
+      const weekStart = getWeekStart(new Date(rec.date));
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekEnd.getDate() + 6);
+      const key = `${rec.employeeName}__${toDay(weekStart)}`;
+
+      if (!weekMap[key]) {
+        weekMap[key] = {
+          employeeName: rec.employeeName,
+          weekStart: toDay(weekStart),
+          weekEnd: toDay(weekEnd),
+          totalHours: 0,
+          daysWorked: 0,
+          daysEstimated: 0
+        };
+      }
+      weekMap[key].totalHours += rec.hours;
+      weekMap[key].daysWorked += 1;
+      if (rec.isEstimated) weekMap[key].daysEstimated += 1;
+    }
+
+    const result = Object.values(weekMap).map((w) => ({
+      ...w,
+      totalHours: Math.round(w.totalHours * 100) / 100
+    }));
+
+    result.sort((a, b) => {
+      if (a.employeeName !== b.employeeName) return a.employeeName.localeCompare(b.employeeName, "ar");
+      return b.weekStart.localeCompare(a.weekStart); // الأحدث أولاً
+    });
+
+    return result;
+  }
+
+  function renderTable(weeklySummary) {
+    tableBody.innerHTML = "";
+    if (weeklySummary.length === 0) {
+      emptyEl.style.display = "block";
+      return;
+    }
+    emptyEl.style.display = "none";
+
+    for (const w of weeklySummary) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${w.employeeName}</td>
+        <td>${w.weekStart}</td>
+        <td>${w.weekEnd}</td>
+        <td class="num">${w.totalHours}</td>
+        <td class="num">${w.daysWorked}</td>
+        <td class="num ${w.daysEstimated > 0 ? "warn" : ""}">${w.daysEstimated}</td>
+      `;
+      tableBody.appendChild(tr);
+    }
+  }
+
+  function exportToExcel() {
+    if (weeklySummaryCache.length === 0) return;
+
+    const rows = weeklySummaryCache.map((w) => ({
+      "اسم الموظف": w.employeeName,
+      "بداية الأسبوع": w.weekStart,
+      "نهاية الأسبوع": w.weekEnd,
+      "إجمالي الساعات": w.totalHours,
+      "عدد أيام الحضور": w.daysWorked,
+      "أيام بساعات مفترضة": w.daysEstimated
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [{ wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 18 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "الملخص الأسبوعي");
+
+    const filename = `تقرير_الحضور_${toDay(new Date())}.xlsx`;
+    XLSX.writeFile(wb, filename);
+  }
+
+  async function init() {
+    try {
+      const events = await loadEvents();
+      const dailyRecords = buildDailyRecords(events);
+      const weeklySummary = buildWeeklySummary(dailyRecords);
+      weeklySummaryCache = weeklySummary;
+      renderTable(weeklySummary);
+    } catch (err) {
+      console.error(err);
+      loadingEl.textContent = "حصل خطأ في تحميل البيانات. تأكد من إعدادات Firebase.";
+      return;
+    }
+    loadingEl.style.display = "none";
+  }
+
+  exportBtn.addEventListener("click", exportToExcel);
+  init();
+</script>
+
+<style>
+  :root {
+    --bg: #1f2a24;
+    --surface: #2a362e;
+    --surface-raised: #344139;
+    --paper: #f5f1e8;
+    --paper-dim: #cfc9b8;
+    --sage: #8fa876;
+    --sage-bright: #a4c187;
+    --clay: #c97b5b;
+    --line: #3f4d43;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--paper);
+    font-family: "Cairo", "Segoe UI", sans-serif;
+    padding: 28px 16px 60px;
+  }
+
+  .wrap {
+    max-width: 860px;
+    margin: 0 auto;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  h1 {
+    font-size: 24px;
+    font-weight: 800;
+    margin: 0;
+  }
+
+  .subtitle {
+    color: var(--paper-dim);
+    font-size: 14px;
+    margin-top: 4px;
+  }
+
+  button#exportBtn {
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 12px 22px;
+    border-radius: 10px;
+    border: none;
+    background: var(--sage);
+    color: #16201a;
+    cursor: pointer;
+  }
+  button#exportBtn:hover { filter: brightness(1.08); }
+
+  .table-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+
+  thead th {
+    text-align: right;
+    padding: 14px 16px;
+    background: var(--surface-raised);
+    color: var(--paper-dim);
+    font-weight: 700;
+    font-size: 13px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  tbody td {
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  tbody tr:last-child td { border-bottom: none; }
+
+  td.num { font-variant-numeric: tabular-nums; }
+  td.warn { color: var(--clay); font-weight: 700; }
+
+  #loading, #empty {
+    padding: 40px 16px;
+    text-align: center;
+    color: var(--paper-dim);
+  }
+  #empty { display: none; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1>الملخص الأسبوعي</h1>
+        <div class="subtitle">ساعات العمل الفعلية لكل موظف — تعليمات الترعة</div>
+      </div>
+      <button id="exportBtn">⬇ تصدير Excel</button>
+    </div>
+
+    <div class="table-card">
+      <div id="loading">جاري تحميل البيانات...</div>
+      <div id="empty">لا توجد بيانات حضور مسجلة بعد.</div>
+      <table>
+        <thead>
+          <tr>
+            <th>الموظف</th>
+            <th>بداية الأسبوع</th>
+            <th>نهاية الأسبوع</th>
+            <th>إجمالي الساعات</th>
+            <th>أيام الحضور</th>
+            <th>أيام مفترضة</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
