@@ -63,7 +63,8 @@
         employeeName: data.employeeName,
         type: data.type,
         timestamp: ts,
-        durationMinutes: data.durationMinutes
+        durationMinutes: data.durationMinutes,
+        delayMinutes: Number(data.delayMinutes) || 0
       });
     });
     return events;
@@ -112,6 +113,9 @@
 
         // مجموع دقائق الاستئذان في اليوم (باستثناء "بدون عودة" اللي بيتعامل معاه كانصراف فعلي)
         const permissionEvents = dayEvents.filter((e) => e.type === "permission");
+        const delayMinutes = dayEvents
+          .filter((e) => e.type === "delay")
+          .reduce((sum, e) => sum + (Number(e.delayMinutes) || 0), 0);
         const noReturnPermission = permissionEvents.find((e) => e.durationMinutes === "no_return");
         const timedPermissionMinutes = permissionEvents
           .filter((e) => e.durationMinutes !== "no_return")
@@ -129,10 +133,11 @@
 
         if (effectiveCheckOut) {
           hours = (effectiveCheckOut.timestamp - checkIn.timestamp) / 3600000;
-          hours -= timedPermissionMinutes / 60; // خصم مدة الاستئذان المحدد من ساعات اليوم
+          hours -= timedPermissionMinutes / 60;
+          hours -= delayMinutes / 60; // خصم مدة الاستئذان المحدد من ساعات اليوم
           isEstimated = false;
         } else {
-          hours = DEFAULT_WORK_HOURS - (timedPermissionMinutes / 60);
+          hours = DEFAULT_WORK_HOURS - (timedPermissionMinutes / 60) - (delayMinutes / 60);
           isEstimated = true;
         }
 
@@ -145,6 +150,7 @@
           isEstimated,
           isLeave: false,
           permissionMinutes: timedPermissionMinutes,
+          delayMinutes,
           hasNoReturnPermission: !!noReturnPermission
         });
       }
@@ -169,7 +175,8 @@
           daysWorked: 0,
           daysEstimated: 0,
           daysLeave: 0,
-          daysWithPermission: 0
+          daysWithPermission: 0,
+          totalDelayMinutes: 0
         };
       }
       weekMap[key].totalHours += rec.hours;
@@ -177,11 +184,13 @@
       if (rec.isEstimated) weekMap[key].daysEstimated += 1;
       if (rec.isLeave) weekMap[key].daysLeave += 1;
       if (rec.permissionMinutes > 0 || rec.hasNoReturnPermission) weekMap[key].daysWithPermission += 1;
+      weekMap[key].totalDelayMinutes += rec.delayMinutes || 0;
     }
 
     const result = Object.values(weekMap).map((w) => ({
       ...w,
-      totalHours: Math.round(w.totalHours * 100) / 100
+      totalHours: Math.round(w.totalHours * 100) / 100,
+      totalDelayMinutes: w.totalDelayMinutes
     }));
 
     result.sort((a, b) => {
@@ -209,6 +218,7 @@
         <td class="num">${w.totalHours}</td>
         <td class="num">${w.daysWorked}</td>
         <td class="num ${w.daysEstimated > 0 ? "warn" : ""}">${w.daysEstimated}</td>
+        <td class="num ${w.totalDelayMinutes > 0 ? "warn" : ""}">${w.totalDelayMinutes} دقيقة</td>
         <td class="num ${w.daysLeave > 0 ? "leave" : ""}">${w.daysLeave}</td>
         <td class="num ${w.daysWithPermission > 0 ? "permission" : ""}">${w.daysWithPermission}</td>
       `;
@@ -226,12 +236,13 @@
       "إجمالي الساعات": w.totalHours,
       "عدد أيام الحضور": w.daysWorked,
       "أيام بساعات مفترضة": w.daysEstimated,
+      "إجمالي التأخير بالدقائق": w.totalDelayMinutes,
       "أيام إجازة": w.daysLeave,
       "أيام فيها استئذان": w.daysWithPermission
     }));
 
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{ wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 12 }, { wch: 16 }];
+    ws["!cols"] = [{ wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 16 }];
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "الملخص الأسبوعي");
@@ -364,6 +375,13 @@
   }
   #empty { display: none; }
 </style>
+
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#2563eb">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="الحضور والانصراف">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
 </head>
 <body>
   <div class="wrap">
@@ -387,6 +405,7 @@
             <th>إجمالي الساعات</th>
             <th>أيام الحضور</th>
             <th>أيام مفترضة</th>
+            <th>إجمالي التأخير</th>
             <th>أيام إجازة</th>
             <th>أيام استئذان</th>
           </tr>
@@ -395,5 +414,13 @@
       </table>
     </div>
   </div>
+
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(console.error);
+  });
+}
+</script>
 </body>
 </html>

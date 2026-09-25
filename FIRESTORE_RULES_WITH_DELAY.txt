@@ -1,0 +1,23 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /attendance_events/{eventId} {
+      allow read: if true;
+      allow create: if request.resource.data.employeeName is string
+                    && request.resource.data.type in ["check_in", "check_out", "leave", "permission", "delay"]
+                    && (request.resource.data.type != "delay" || (request.resource.data.delayMinutes is int && request.resource.data.delayMinutes >= 5));
+      allow update, delete: if false;
+    }
+    match /app_config/employees {
+      allow read: if true;
+      allow write: if true;
+    }
+    match /employee_auth/{employeeName} {
+      allow read: if true;
+      allow create: if request.resource.data.passwordHash is string
+                    && !exists(/databases/$(database)/documents/employee_auth/$(employeeName));
+      allow delete: if true;
+      allow update: if false;
+    }
+  }
+}
