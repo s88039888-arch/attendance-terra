@@ -12,7 +12,7 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
   import {
     getFirestore, collection, addDoc, query, where, orderBy, limit,
-    getDocs, serverTimestamp, Timestamp, doc, getDoc
+    getDocs, serverTimestamp, Timestamp, doc, getDoc, setDoc
   } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
   // ============================================================
@@ -36,11 +36,24 @@
   const db = getFirestore(app);
   const EVENTS_COLLECTION = "attendance_events";
   const CONFIG_DOC = doc(db, "app_config", "employees");
+  const AUTH_COLLECTION = "employee_auth"; // كل مستند فيه: passwordHash
+
+  // ---------------------------------------------------------------
+  // تشفير بسيط للباسورد (SHA-256) — مايُخزّنش الباسورد نفسه أبدًا
+  // ---------------------------------------------------------------
+  async function hashPassword(password) {
+    const data = new TextEncoder().encode(password);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
 
   // ---------------------------------------------------------------
   // تحميل قائمة الموظفين من قاعدة البيانات (تُدار من صفحة admin.html)
   // ---------------------------------------------------------------
   const employeeSelect = document.getElementById("employeeSelect");
+  const loginNameSelect = document.getElementById("loginNameSelect");
+
+  let employeeNames = FALLBACK_EMPLOYEES;
 
   async function loadEmployeeList() {
     let names = FALLBACK_EMPLOYEES;
@@ -52,22 +65,135 @@
     } catch (err) {
       console.error("تعذر تحميل قائمة الموظفين، سيتم استخدام القائمة الاحتياطية", err);
     }
+    employeeNames = names;
 
-    employeeSelect.innerHTML = `<option value="" disabled selected>اختر اسمك من القائمة</option>`;
-    names.forEach((name) => {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      employeeSelect.appendChild(opt);
+    [employeeSelect, loginNameSelect].forEach((select) => {
+      if (!select) return;
+      select.innerHTML = `<option value="" disabled selected>اختر اسمك من القائمة</option>`;
+      names.forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+      });
     });
+  }
 
-    // استرجاع آخر موظف مُختار (تسهيل الاستخدام اليومي)
-    const savedEmployee = localStorage.getItem("lastEmployee");
-    if (savedEmployee && names.includes(savedEmployee)) {
-      employeeSelect.value = savedEmployee;
-      loadLastAction(savedEmployee);
+  // ---------------------------------------------------------------
+  // شاشة الدخول: تسجيل دخول بباسورد، أو إنشاء باسورد أول مرة
+  // ---------------------------------------------------------------
+  const loginScreen = document.getElementById("loginScreen");
+  const mainCard = document.getElementById("mainCard");
+  const loginPasswordInput = document.getElementById("loginPasswordInput");
+  const loginSubmitBtn = document.getElementById("loginSubmitBtn");
+  const loginError = document.getElementById("loginError");
+  const loginModeLabel = document.getElementById("loginModeLabel");
+  const loginHint = document.getElementById("loginHint");
+
+  const LOGGED_IN_KEY = "loggedInEmployee";
+
+  async function checkEmployeeHasPassword(name) {
+    const snap = await getDoc(doc(db, AUTH_COLLECTION, name));
+    return snap.exists() && !!snap.data().passwordHash;
+  }
+
+  async function refreshLoginMode() {
+    const name = loginNameSelect.value;
+    loginError.classList.remove("show");
+    if (!name) {
+      loginModeLabel.textContent = "";
+      loginHint.textContent = "";
+      return;
+    }
+    loginSubmitBtn.disabled = true;
+    loginModeLabel.textContent = "جاري التحقق...";
+    const hasPassword = await checkEmployeeHasPassword(name);
+    loginSubmitBtn.disabled = false;
+    if (hasPassword) {
+      loginModeLabel.textContent = `تسجيل دخول: ${name}`;
+      loginHint.textContent = "ادخل الباسورد بتاعك";
+      loginSubmitBtn.textContent = "دخول";
+    } else {
+      loginModeLabel.textContent = `أول مرة يا ${name}؟`;
+      loginHint.textContent = "اختر باسورد جديد لنفسك (هتستخدمه في كل مرة بعد كده)";
+      loginSubmitBtn.textContent = "إنشاء الباسورد والدخول";
     }
   }
+
+  async function handleLoginSubmit() {
+    const name = loginNameSelect.value;
+    const password = loginPasswordInput.value;
+
+    if (!name) {
+      showLoginError("اختر اسمك الأول");
+      return;
+    }
+    if (!password || password.length < 4) {
+      showLoginError("الباسورد لازم يكون 4 أحرف/أرقام على الأقل");
+      return;
+    }
+
+    loginSubmitBtn.disabled = true;
+    const originalText = loginSubmitBtn.textContent;
+    loginSubmitBtn.textContent = "جاري التحقق...";
+
+    try {
+      const authDocRef = doc(db, AUTH_COLLECTION, name);
+      const snap = await getDoc(authDocRef);
+      const hash = await hashPassword(password);
+
+      if (snap.exists() && snap.data().passwordHash) {
+        // تسجيل دخول عادي
+        if (snap.data().passwordHash !== hash) {
+          showLoginError("الباسورد غلط، حاول تاني");
+          loginSubmitBtn.disabled = false;
+          loginSubmitBtn.textContent = originalText;
+          return;
+        }
+      } else {
+        // أول مرة: إنشاء الباسورد
+        await setDoc(authDocRef, { passwordHash: hash, createdAt: new Date().toISOString() });
+      }
+
+      completeLogin(name);
+    } catch (err) {
+      console.error(err);
+      showLoginError("حصل خطأ، تأكد من الاتصال بالإنترنت وحاول تاني");
+      loginSubmitBtn.disabled = false;
+      loginSubmitBtn.textContent = originalText;
+    }
+  }
+
+  function showLoginError(message) {
+    loginError.textContent = message;
+    loginError.classList.add("show");
+  }
+
+  function completeLogin(name) {
+    localStorage.setItem(LOGGED_IN_KEY, name);
+    loginScreen.style.display = "none";
+    mainCard.style.display = "block";
+    employeeSelect.innerHTML = `<option value="${name}" selected>${name}</option>`;
+    employeeSelect.value = name;
+    document.getElementById("welcomeText").textContent = `أهلاً ${name} 👋`;
+    loadLastAction(name);
+  }
+
+  function logout() {
+    localStorage.removeItem(LOGGED_IN_KEY);
+    loginPasswordInput.value = "";
+    loginNameSelect.value = "";
+    loginModeLabel.textContent = "";
+    loginHint.textContent = "";
+    mainCard.style.display = "none";
+    loginScreen.style.display = "flex";
+  }
+
+  loginNameSelect.addEventListener("change", refreshLoginMode);
+  loginSubmitBtn.addEventListener("click", handleLoginSubmit);
+  loginPasswordInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") handleLoginSubmit();
+  });
 
   const statusEl = document.getElementById("status");
   const checkInBtn = document.getElementById("checkInBtn");
@@ -171,7 +297,7 @@
 
   checkInBtn.addEventListener("click", () => recordCheckInOut("check_in"));
   checkOutBtn.addEventListener("click", () => recordCheckInOut("check_out"));
-  employeeSelect.addEventListener("change", () => loadLastAction(employeeSelect.value));
+
 
   // ---------------------------------------------------------------
   // زرار الإجازة
@@ -221,16 +347,35 @@
     });
   });
 
-  // تحميل قائمة الموظفين من قاعدة البيانات عند فتح الصفحة
-  loadEmployeeList();
+  // ---------------------------------------------------------------
+  // زرار الخروج
+  // ---------------------------------------------------------------
+  document.getElementById("logoutBtn").addEventListener("click", logout);
 
-  // تحديث الساعة والتاريخ الحي
-  const clockEl = document.getElementById("clock");
-  const dateLineEl = document.getElementById("dateLine");
+  // ---------------------------------------------------------------
+  // تشغيل أولي: تحميل الموظفين، ومحاولة استرجاع جلسة سابقة
+  // ---------------------------------------------------------------
+  async function init() {
+    await loadEmployeeList();
+
+    const savedName = localStorage.getItem(LOGGED_IN_KEY);
+    if (savedName && employeeNames.includes(savedName)) {
+      // في وضع "تذكرني" البسيط ده، مجرد وجود الاسم محفوظ كفاية لإعادة الدخول
+      // على نفس الجهاز (الباسورد اتأكد منه أول مرة سجل فيها دخول)
+      completeLogin(savedName);
+    }
+  }
+  init();
+
+  // تحديث الساعة والتاريخ الحي (في الشاشتين)
+  const clockEls = [document.getElementById("clock"), document.getElementById("clockMain")];
+  const dateLineEls = [document.getElementById("dateLine"), document.getElementById("dateLineMain")];
   function tickClock() {
     const now = new Date();
-    clockEl.textContent = now.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    dateLineEl.textContent = formatDate(now);
+    const timeStr = now.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const dateStr = formatDate(now);
+    clockEls.forEach((el) => { if (el) el.textContent = timeStr; });
+    dateLineEls.forEach((el) => { if (el) el.textContent = dateStr; });
   }
   tickClock();
   setInterval(tickClock, 1000);
@@ -448,6 +593,75 @@
     line-height: 1.6;
   }
 
+  /* ===================== شاشة تسجيل الدخول ===================== */
+  .login-mode-label {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--sage-bright);
+    min-height: 18px;
+    margin: 10px 0 2px;
+  }
+
+  .password-label {
+    margin-top: 4px;
+  }
+
+  #loginPasswordInput {
+    width: 100%;
+    padding: 14px 16px;
+    font-size: 17px;
+    font-family: inherit;
+    color: var(--paper);
+    background: var(--surface-raised);
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+    margin-bottom: 4px;
+  }
+  #loginPasswordInput:focus { outline: none; border-color: var(--sage); }
+
+  .login-hint {
+    font-size: 12px;
+    color: var(--paper-dim);
+    min-height: 16px;
+    margin-bottom: 4px;
+  }
+
+  .error-msg {
+    color: var(--clay-bright);
+    font-size: 13px;
+    font-weight: 700;
+    min-height: 18px;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .error-msg.show { opacity: 1; }
+
+  .logged-in-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .logged-in-row h1 {
+    margin: 0 0 20px;
+  }
+
+  .logout-btn {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 8px 14px;
+    border-radius: 10px;
+    border: 1.5px solid var(--line);
+    background: transparent;
+    color: var(--paper-dim);
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .logout-btn:hover { border-color: var(--clay); color: var(--clay-bright); }
+
   @media (prefers-reduced-motion: reduce) {
     button.action, .status { transition: none; }
   }
@@ -529,19 +743,49 @@
 </head>
 <body>
 
-  <div class="card">
+  <!-- شاشة تسجيل الدخول -->
+  <div class="card" id="loginScreen">
     <div class="eyebrow">
       <span class="farm-name">تعليمات الترعة</span>
       <span class="clock" id="clock">--:--:--</span>
     </div>
     <div class="date-line" id="dateLine"></div>
 
-    <h1>سجّل حضورك أو انصرافك</h1>
+    <h1>تسجيل الدخول</h1>
 
-    <label for="employeeSelect">اسمك</label>
-    <select id="employeeSelect">
+    <label for="loginNameSelect">اسمك</label>
+    <select id="loginNameSelect">
       <option value="" disabled selected>اختر اسمك من القائمة</option>
     </select>
+
+    <div class="login-mode-label" id="loginModeLabel"></div>
+
+    <label for="loginPasswordInput" class="password-label">الباسورد</label>
+    <input type="password" id="loginPasswordInput" placeholder="اكتب الباسورد بتاعك" autocomplete="off">
+    <div class="login-hint" id="loginHint"></div>
+    <div class="error-msg" id="loginError"></div>
+
+    <button class="action" id="loginSubmitBtn" style="width:100%; margin-top: 14px;">دخول</button>
+
+    <div class="footer-note">
+      أول مرة تدخل بيها، اختار أي باسورد وهيتسجل لك تلقائيًا
+    </div>
+  </div>
+
+  <!-- الصفحة الرئيسية بعد تسجيل الدخول -->
+  <div class="card" id="mainCard" style="display:none;">
+    <div class="eyebrow">
+      <span class="farm-name">تعليمات الترعة</span>
+      <span class="clock" id="clockMain">--:--:--</span>
+    </div>
+    <div class="date-line" id="dateLineMain"></div>
+
+    <div class="logged-in-row">
+      <h1 id="welcomeText">سجّل حضورك أو انصرافك</h1>
+      <button class="logout-btn" id="logoutBtn">خروج</button>
+    </div>
+
+    <select id="employeeSelect" style="display:none;"></select>
     <div class="last-action" id="lastAction"></div>
 
     <div class="buttons">

@@ -10,7 +10,7 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
   import {
-    getFirestore, doc, getDoc, setDoc
+    getFirestore, doc, getDoc, setDoc, deleteDoc
   } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -33,6 +33,7 @@
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
   const CONFIG_DOC = doc(db, "app_config", "employees");
+  const AUTH_COLLECTION = "employee_auth";
 
   // ---------------------------------------------------------------
   // شاشة الدخول بكلمة السر
@@ -99,19 +100,42 @@
       row.className = "employee-row";
       row.innerHTML = `
         <span class="employee-name">${escapeHtml(name)}</span>
-        <button class="delete-btn" data-index="${index}">حذف</button>
+        <div class="row-actions">
+          <button class="reset-btn" data-index="${index}">إعادة ضبط الباسورد</button>
+          <button class="delete-btn" data-index="${index}">حذف</button>
+        </div>
       `;
       employeeList.appendChild(row);
     });
 
     document.querySelectorAll(".delete-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
+      btn.addEventListener("click", async () => {
         const idx = parseInt(btn.dataset.index, 10);
         const name = currentEmployees[idx];
-        if (confirm(`متأكد إنك عايز تمسح "${name}"؟`)) {
+        if (confirm(`متأكد إنك عايز تمسح "${name}"؟ (هيتم مسح الباسورد بتاعه كمان)`)) {
           currentEmployees.splice(idx, 1);
           renderList();
-          saveEmployees(true);
+          await saveEmployees(true);
+          try {
+            await deleteDoc(doc(db, AUTH_COLLECTION, name));
+          } catch (err) {
+            console.error("تعذر مسح بيانات الدخول القديمة:", err);
+          }
+        }
+      });
+    });
+
+    document.querySelectorAll(".reset-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const idx = parseInt(btn.dataset.index, 10);
+        const name = currentEmployees[idx];
+        if (!confirm(`تصفير باسورد "${name}"؟ هيقدر يعمل باسورد جديد أول ما يدخل تاني.`)) return;
+        try {
+          await deleteDoc(doc(db, AUTH_COLLECTION, name));
+          showStatus(`تم تصفير باسورد ${name}`, "success");
+        } catch (err) {
+          console.error(err);
+          showStatus("حصل خطأ، حاول تاني", "error");
         }
       });
     });
@@ -282,12 +306,29 @@
     background: var(--surface-raised);
     border-radius: 10px;
     border: 1px solid var(--line);
+    gap: 10px;
+    flex-wrap: wrap;
   }
 
   .employee-name {
     font-weight: 700;
     font-size: 15px;
   }
+
+  .row-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .reset-btn {
+    padding: 8px 12px;
+    background: rgba(143,168,118,0.15);
+    color: var(--sage-bright);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .reset-btn:hover { background: rgba(143,168,118,0.28); }
 
   .delete-btn {
     padding: 8px 14px;
