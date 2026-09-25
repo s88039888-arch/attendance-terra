@@ -85,7 +85,11 @@
     return date.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
   }
 
-  async function recordEvent(type) {
+  function formatDate(date) {
+    return date.toLocaleDateString("ar-EG", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  }
+
+  async function recordEvent(type, extra) {
     const employee = employeeSelect.value;
     if (!employee) {
       setStatus("اختر اسمك الأول من القائمة", "error");
@@ -94,32 +98,40 @@
 
     localStorage.setItem("lastEmployee", employee);
 
-    const btn = type === "check_in" ? checkInBtn : checkOutBtn;
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    checkInBtn.disabled = true;
-    checkOutBtn.disabled = true;
-    btn.textContent = "جاري التسجيل...";
-
     try {
       await addDoc(collection(db, EVENTS_COLLECTION), {
         employeeName: employee,
         type: type,
         timestamp: serverTimestamp(),
-        clientTime: new Date().toISOString()
+        clientTime: new Date().toISOString(),
+        ...(extra || {})
       });
 
-      const label = type === "check_in" ? "حضور" : "انصراف";
+      const labels = {
+        check_in: "حضور",
+        check_out: "انصراف",
+        leave: "إجازة اليوم",
+        permission: "استئذان"
+      };
+      const label = labels[type] || type;
       setStatus(`تم تسجيل ${label} بنجاح — ${formatTime(new Date())}`, "success");
       await loadLastAction(employee);
     } catch (err) {
       console.error(err);
       setStatus("حصل خطأ، حاول تاني (تأكد من الاتصال بالإنترنت)", "error");
-    } finally {
-      btn.textContent = originalText;
-      checkInBtn.disabled = false;
-      checkOutBtn.disabled = false;
     }
+  }
+
+  async function recordCheckInOut(type) {
+    const btn = type === "check_in" ? checkInBtn : checkOutBtn;
+    const originalText = btn.textContent;
+    checkInBtn.disabled = true;
+    checkOutBtn.disabled = true;
+    btn.textContent = "جاري التسجيل...";
+    await recordEvent(type);
+    btn.textContent = originalText;
+    checkInBtn.disabled = false;
+    checkOutBtn.disabled = false;
   }
 
   async function loadLastAction(employee) {
@@ -140,7 +152,15 @@
         return;
       }
       const data = snap.docs[0].data();
-      const label = data.type === "check_in" ? "حضور" : "انصراف";
+      const labels = {
+        check_in: "حضور",
+        check_out: "انصراف",
+        leave: "إجازة",
+        permission: data.durationMinutes === "no_return"
+          ? "استئذان بدون عودة"
+          : `استئذان (${data.durationMinutes} دقيقة)`
+      };
+      const label = labels[data.type] || data.type;
       const ts = data.timestamp ? data.timestamp.toDate() : new Date(data.clientTime);
       lastActionEl.textContent = `آخر تسجيل: ${label} — ${formatTime(ts)}`;
     } catch (err) {
@@ -149,18 +169,68 @@
     }
   }
 
-  checkInBtn.addEventListener("click", () => recordEvent("check_in"));
-  checkOutBtn.addEventListener("click", () => recordEvent("check_out"));
+  checkInBtn.addEventListener("click", () => recordCheckInOut("check_in"));
+  checkOutBtn.addEventListener("click", () => recordCheckInOut("check_out"));
   employeeSelect.addEventListener("change", () => loadLastAction(employeeSelect.value));
+
+  // ---------------------------------------------------------------
+  // زرار الإجازة
+  // ---------------------------------------------------------------
+  const leaveBtn = document.getElementById("leaveBtn");
+  leaveBtn.addEventListener("click", async () => {
+    const employee = employeeSelect.value;
+    if (!employee) {
+      setStatus("اختر اسمك الأول من القائمة", "error");
+      return;
+    }
+    if (!confirm(`تسجيل إجازة اليوم لـ "${employee}"؟`)) return;
+    leaveBtn.disabled = true;
+    await recordEvent("leave");
+    leaveBtn.disabled = false;
+  });
+
+  // ---------------------------------------------------------------
+  // زرار الاستئذان + نافذة اختيار المدة
+  // ---------------------------------------------------------------
+  const permissionBtn = document.getElementById("permissionBtn");
+  const permissionModal = document.getElementById("permissionModal");
+  const modalCancelBtn = document.getElementById("modalCancelBtn");
+
+  permissionBtn.addEventListener("click", () => {
+    const employee = employeeSelect.value;
+    if (!employee) {
+      setStatus("اختر اسمك الأول من القائمة", "error");
+      return;
+    }
+    permissionModal.classList.add("show");
+  });
+
+  modalCancelBtn.addEventListener("click", () => {
+    permissionModal.classList.remove("show");
+  });
+
+  permissionModal.addEventListener("click", (e) => {
+    if (e.target === permissionModal) permissionModal.classList.remove("show");
+  });
+
+  document.querySelectorAll(".modal-option").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const duration = btn.dataset.duration; // "no_return" أو عدد الدقائق كنص
+      permissionModal.classList.remove("show");
+      await recordEvent("permission", { durationMinutes: duration });
+    });
+  });
 
   // تحميل قائمة الموظفين من قاعدة البيانات عند فتح الصفحة
   loadEmployeeList();
 
-  // تحديث الساعة الحية
+  // تحديث الساعة والتاريخ الحي
   const clockEl = document.getElementById("clock");
+  const dateLineEl = document.getElementById("dateLine");
   function tickClock() {
     const now = new Date();
     clockEl.textContent = now.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    dateLineEl.textContent = formatDate(now);
   }
   tickClock();
   setInterval(tickClock, 1000);
@@ -229,6 +299,13 @@
     color: var(--paper-dim);
     font-variant-numeric: tabular-nums;
     direction: ltr;
+  }
+
+  .date-line {
+    font-size: 13px;
+    color: var(--paper-dim);
+    margin-top: 2px;
+    margin-bottom: 4px;
   }
 
   h1 {
@@ -316,6 +393,29 @@
 
   #checkOutBtn:hover:not(:disabled) { filter: brightness(1.08); }
 
+  .secondary-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 10px;
+  }
+
+  button.action-secondary {
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 13px 8px;
+    border-radius: 12px;
+    border: 1.5px solid var(--line);
+    background: transparent;
+    color: var(--paper-dim);
+    cursor: pointer;
+    transition: transform 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  }
+
+  button.action-secondary:active { transform: scale(0.96); }
+  button.action-secondary:hover { border-color: var(--sage); color: var(--sage-bright); }
+
   .status {
     margin-top: 18px;
     padding: 12px 14px;
@@ -351,6 +451,80 @@
   @media (prefers-reduced-motion: reduce) {
     button.action, .status { transition: none; }
   }
+
+  /* ===================== نافذة اختيار الاستئذان ===================== */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 20, 17, 0.72);
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 100;
+  }
+
+  .modal-overlay.show {
+    display: flex;
+  }
+
+  .modal-card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 24px 20px;
+  }
+
+  .modal-card h2 {
+    font-size: 18px;
+    font-weight: 800;
+    margin: 0 0 16px;
+    text-align: center;
+  }
+
+  .modal-options {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  button.modal-option {
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 14px 12px;
+    border-radius: 12px;
+    border: 1.5px solid var(--line);
+    background: var(--surface-raised);
+    color: var(--paper);
+    cursor: pointer;
+    transition: border-color 0.12s ease, transform 0.12s ease;
+  }
+
+  button.modal-option:active { transform: scale(0.97); }
+  button.modal-option:hover { border-color: var(--sage); }
+
+  button.modal-option[data-duration="no_return"] {
+    border-color: rgba(201,123,91,0.5);
+    color: var(--clay-bright);
+  }
+
+  button.modal-cancel {
+    width: 100%;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 12px;
+    border-radius: 12px;
+    border: none;
+    background: transparent;
+    color: var(--paper-dim);
+    cursor: pointer;
+  }
+  button.modal-cancel:hover { color: var(--paper); }
 </style>
 </head>
 <body>
@@ -360,6 +534,7 @@
       <span class="farm-name">تعليمات الترعة</span>
       <span class="clock" id="clock">--:--:--</span>
     </div>
+    <div class="date-line" id="dateLine"></div>
 
     <h1>سجّل حضورك أو انصرافك</h1>
 
@@ -374,10 +549,29 @@
       <button class="action" id="checkOutBtn">✕ انصراف</button>
     </div>
 
+    <div class="secondary-buttons">
+      <button class="action-secondary" id="leaveBtn">🏖 إجازة اليوم</button>
+      <button class="action-secondary" id="permissionBtn">🕐 استئذان</button>
+    </div>
+
     <div class="status" id="status"></div>
 
     <div class="footer-note">
       اضغط الزرار المناسب عند بداية أو نهاية يوم عملك فقط
+    </div>
+  </div>
+
+  <!-- نافذة اختيار نوع الاستئذان -->
+  <div class="modal-overlay" id="permissionModal">
+    <div class="modal-card">
+      <h2>نوع الاستئذان</h2>
+      <div class="modal-options">
+        <button class="modal-option" data-duration="no_return">استئذان بدون عودة</button>
+        <button class="modal-option" data-duration="30">نص ساعة (30 دقيقة)</button>
+        <button class="modal-option" data-duration="60">ساعة</button>
+        <button class="modal-option" data-duration="120">ساعتين</button>
+      </div>
+      <button class="modal-cancel" id="modalCancelBtn">إلغاء</button>
     </div>
   </div>
 

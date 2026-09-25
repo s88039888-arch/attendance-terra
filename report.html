@@ -16,12 +16,12 @@
 
   // ⚠️ نفس إعدادات Firebase المستخدمة في index.html
   const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_PROJECT.firebaseapp.com",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_PROJECT.appspot.com",
-    messagingSenderId: "YOUR_SENDER_ID",
-    appId: "YOUR_APP_ID"
+    apiKey: "AIzaSyBGSGTSL-lVdx54BIECEbbVljXuqCjuu_4",
+    authDomain: "attendance-terra.firebaseapp.com",
+    projectId: "attendance-terra",
+    storageBucket: "attendance-terra.firebasestorage.app",
+    messagingSenderId: "403868956775",
+    appId: "1:403868956775:web:1cefb35a53c72033057cc2"
   };
 
   const DEFAULT_WORK_HOURS = 8; // ساعات مفترضة لو مفيش انصراف مسجل
@@ -59,7 +59,12 @@
     snap.forEach((doc) => {
       const data = doc.data();
       const ts = data.timestamp ? data.timestamp.toDate() : new Date(data.clientTime);
-      events.push({ employeeName: data.employeeName, type: data.type, timestamp: ts });
+      events.push({
+        employeeName: data.employeeName,
+        type: data.type,
+        timestamp: ts,
+        durationMinutes: data.durationMinutes
+      });
     });
     return events;
   }
@@ -84,18 +89,50 @@
 
       for (const day of Object.keys(byDay)) {
         const dayEvents = byDay[day];
+
+        // يوم إجازة: يتسجل بصفر ساعات ولا يُحتسب كساعات مفترضة
+        const leaveEvent = dayEvents.find((e) => e.type === "leave");
+        if (leaveEvent) {
+          dailyRecords.push({
+            employeeName: name,
+            date: day,
+            checkIn: null,
+            checkOut: null,
+            hours: 0,
+            isEstimated: false,
+            isLeave: true,
+            permissionMinutes: 0
+          });
+          continue;
+        }
+
         const checkIn = dayEvents.find((e) => e.type === "check_in");
         const checkOuts = dayEvents.filter((e) => e.type === "check_out");
         const checkOut = checkOuts.length ? checkOuts[checkOuts.length - 1] : null;
 
-        if (!checkIn) continue;
+        // مجموع دقائق الاستئذان في اليوم (باستثناء "بدون عودة" اللي بيتعامل معاه كانصراف فعلي)
+        const permissionEvents = dayEvents.filter((e) => e.type === "permission");
+        const noReturnPermission = permissionEvents.find((e) => e.durationMinutes === "no_return");
+        const timedPermissionMinutes = permissionEvents
+          .filter((e) => e.durationMinutes !== "no_return")
+          .reduce((sum, e) => sum + (parseInt(e.durationMinutes, 10) || 0), 0);
+
+        if (!checkIn) continue; // مفيش حضور أصلًا، مفيش حاجة نحسبها
 
         let hours, isEstimated;
-        if (checkOut) {
-          hours = (checkOut.timestamp - checkIn.timestamp) / 3600000;
+        let effectiveCheckOut = checkOut;
+
+        // استئذان بدون عودة: نعامله كأنه وقت الانصراف الفعلي لو مفيش انصراف مسجل بعده
+        if (noReturnPermission && (!checkOut || noReturnPermission.timestamp > checkOut.timestamp)) {
+          effectiveCheckOut = noReturnPermission;
+        }
+
+        if (effectiveCheckOut) {
+          hours = (effectiveCheckOut.timestamp - checkIn.timestamp) / 3600000;
+          hours -= timedPermissionMinutes / 60; // خصم مدة الاستئذان المحدد من ساعات اليوم
           isEstimated = false;
         } else {
-          hours = DEFAULT_WORK_HOURS;
+          hours = DEFAULT_WORK_HOURS - (timedPermissionMinutes / 60);
           isEstimated = true;
         }
 
@@ -103,9 +140,12 @@
           employeeName: name,
           date: day,
           checkIn: checkIn.timestamp,
-          checkOut: checkOut ? checkOut.timestamp : null,
-          hours: Math.round(hours * 100) / 100,
-          isEstimated
+          checkOut: effectiveCheckOut ? effectiveCheckOut.timestamp : null,
+          hours: Math.round(Math.max(0, hours) * 100) / 100,
+          isEstimated,
+          isLeave: false,
+          permissionMinutes: timedPermissionMinutes,
+          hasNoReturnPermission: !!noReturnPermission
         });
       }
     }
@@ -127,12 +167,16 @@
           weekEnd: toDay(weekEnd),
           totalHours: 0,
           daysWorked: 0,
-          daysEstimated: 0
+          daysEstimated: 0,
+          daysLeave: 0,
+          daysWithPermission: 0
         };
       }
       weekMap[key].totalHours += rec.hours;
       weekMap[key].daysWorked += 1;
       if (rec.isEstimated) weekMap[key].daysEstimated += 1;
+      if (rec.isLeave) weekMap[key].daysLeave += 1;
+      if (rec.permissionMinutes > 0 || rec.hasNoReturnPermission) weekMap[key].daysWithPermission += 1;
     }
 
     const result = Object.values(weekMap).map((w) => ({
@@ -165,6 +209,8 @@
         <td class="num">${w.totalHours}</td>
         <td class="num">${w.daysWorked}</td>
         <td class="num ${w.daysEstimated > 0 ? "warn" : ""}">${w.daysEstimated}</td>
+        <td class="num ${w.daysLeave > 0 ? "leave" : ""}">${w.daysLeave}</td>
+        <td class="num ${w.daysWithPermission > 0 ? "permission" : ""}">${w.daysWithPermission}</td>
       `;
       tableBody.appendChild(tr);
     }
@@ -179,11 +225,13 @@
       "نهاية الأسبوع": w.weekEnd,
       "إجمالي الساعات": w.totalHours,
       "عدد أيام الحضور": w.daysWorked,
-      "أيام بساعات مفترضة": w.daysEstimated
+      "أيام بساعات مفترضة": w.daysEstimated,
+      "أيام إجازة": w.daysLeave,
+      "أيام فيها استئذان": w.daysWithPermission
     }));
 
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{ wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 18 }];
+    ws["!cols"] = [{ wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 12 }, { wch: 16 }];
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "الملخص الأسبوعي");
@@ -306,6 +354,8 @@
 
   td.num { font-variant-numeric: tabular-nums; }
   td.warn { color: var(--clay); font-weight: 700; }
+  td.leave { color: var(--sage-bright); font-weight: 700; }
+  td.permission { color: #d9c15b; font-weight: 700; }
 
   #loading, #empty {
     padding: 40px 16px;
@@ -337,6 +387,8 @@
             <th>إجمالي الساعات</th>
             <th>أيام الحضور</th>
             <th>أيام مفترضة</th>
+            <th>أيام إجازة</th>
+            <th>أيام استئذان</th>
           </tr>
         </thead>
         <tbody id="tableBody"></tbody>
