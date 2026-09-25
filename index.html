@@ -237,7 +237,8 @@
         check_in: "حضور",
         check_out: "انصراف",
         leave: "إجازة اليوم",
-        permission: "استئذان"
+        permission: "استئذان",
+        delay: "تأخير"
       };
       const label = labels[type] || type;
       setStatus(`تم تسجيل ${label} بنجاح — ${formatTime(new Date())}`, "success");
@@ -297,6 +298,48 @@
 
   checkInBtn.addEventListener("click", () => recordCheckInOut("check_in"));
   checkOutBtn.addEventListener("click", () => recordCheckInOut("check_out"));
+
+  // ---------------------------------------------------------------
+  // زرار التأخير: الموظف يحدد مدة التأخير المتوقعة (من 5 دقائق فأكثر)
+  // ---------------------------------------------------------------
+  const delayBtn = document.getElementById("delayBtn");
+  const delayModal = document.getElementById("delayModal");
+  const delayMinutesInput = document.getElementById("delayMinutesInput");
+  const delaySaveBtn = document.getElementById("delaySaveBtn");
+  const delayCancelBtn = document.getElementById("delayCancelBtn");
+  const delayError = document.getElementById("delayError");
+
+  delayBtn.addEventListener("click", () => {
+    const employee = employeeSelect.value;
+    if (!employee) {
+      setStatus("اختر اسمك الأول من القائمة", "error");
+      return;
+    }
+    delayMinutesInput.value = "";
+    delayError.textContent = "";
+    delayModal.classList.add("show");
+    setTimeout(() => delayMinutesInput.focus(), 50);
+  });
+
+  delayCancelBtn.addEventListener("click", () => {
+    delayModal.classList.remove("show");
+  });
+
+  delayModal.addEventListener("click", (e) => {
+    if (e.target === delayModal) delayModal.classList.remove("show");
+  });
+
+  delaySaveBtn.addEventListener("click", async () => {
+    const minutes = Number.parseInt(delayMinutesInput.value, 10);
+    if (!Number.isInteger(minutes) || minutes < 5) {
+      delayError.textContent = "اكتب مدة التأخير بالدقائق، بحد أدنى 5 دقائق.";
+      return;
+    }
+    delaySaveBtn.disabled = true;
+    await recordEvent("delay", { delayMinutes: minutes });
+    delaySaveBtn.disabled = false;
+    delayModal.classList.remove("show");
+  });
 
 
   // ---------------------------------------------------------------
@@ -796,12 +839,25 @@
     <div class="secondary-buttons">
       <button class="action-secondary" id="leaveBtn">🏖 إجازة اليوم</button>
       <button class="action-secondary" id="permissionBtn">🕐 استئذان</button>
+      <button class="action-secondary" id="delayBtn">⏰ تأخير</button>
     </div>
 
     <div class="status" id="status"></div>
 
     <div class="footer-note">
       اضغط الزرار المناسب عند بداية أو نهاية يوم عملك فقط
+    </div>
+  </div>
+
+  <!-- نافذة تسجيل التأخير -->
+  <div class="modal-overlay" id="delayModal">
+    <div class="modal-card">
+      <h2>تسجيل التأخير</h2>
+      <p style="margin:0 0 12px;color:#777;">اذكر مدة التأخير المتوقعة بالدقائق. أقل مدة 5 دقائق، وسيتم خصمها من الساعات الفعلية في التقرير.</p>
+      <input id="delayMinutesInput" type="number" min="5" step="1" inputmode="numeric" placeholder="مثال: 15" style="width:100%;padding:13px;border:1px solid #ccc;border-radius:10px;font-size:18px;text-align:center;box-sizing:border-box;">
+      <div id="delayError" style="color:#c0392b;font-size:13px;margin-top:8px;min-height:20px;"></div>
+      <button class="modal-option" id="delaySaveBtn">حفظ التأخير</button>
+      <button class="modal-cancel" id="delayCancelBtn">إلغاء</button>
     </div>
   </div>
 
