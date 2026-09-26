@@ -3,272 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>تقرير الحضور — تعليمات الترعة</title>
+<title>التقرير الأسبوعي — تعليمات الترعة</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
-  import {
-    getFirestore, collection, query, orderBy, getDocs
-  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
-
-  // ⚠️ نفس إعدادات Firebase المستخدمة في index.html
-  const firebaseConfig = {
-    apiKey: "AIzaSyBGSGTSL-lVdx54BIECEbbVljXuqCjuu_4",
-    authDomain: "attendance-terra.firebaseapp.com",
-    projectId: "attendance-terra",
-    storageBucket: "attendance-terra.firebasestorage.app",
-    messagingSenderId: "403868956775",
-    appId: "1:403868956775:web:1cefb35a53c72033057cc2"
-  };
-
-  const DEFAULT_WORK_HOURS = 8; // ساعات مفترضة لو مفيش انصراف مسجل
-  const WEEK_START_DAY = 6; // السبت
-
-  const app = initializeApp(firebaseConfig);
-  const db = getFirestore(app);
-  const EVENTS_COLLECTION = "attendance_events";
-
-  const tableBody = document.getElementById("tableBody");
-  const loadingEl = document.getElementById("loading");
-  const emptyEl = document.getElementById("empty");
-  const exportBtn = document.getElementById("exportBtn");
-
-  let weeklySummaryCache = [];
-
-  function toDay(date) {
-    return date.toISOString().slice(0, 10);
-  }
-
-  function getWeekStart(date) {
-    const d = new Date(date);
-    const day = d.getDay();
-    let diff = day - WEEK_START_DAY;
-    if (diff < 0) diff += 7;
-    d.setDate(d.getDate() - diff);
-    d.setHours(0, 0, 0, 0);
-    return d;
-  }
-
-  async function loadEvents() {
-    const q = query(collection(db, EVENTS_COLLECTION), orderBy("timestamp", "asc"));
-    const snap = await getDocs(q);
-    const events = [];
-    snap.forEach((doc) => {
-      const data = doc.data();
-      const ts = data.timestamp ? data.timestamp.toDate() : new Date(data.clientTime);
-      events.push({
-        employeeName: data.employeeName,
-        type: data.type,
-        timestamp: ts,
-        durationMinutes: data.durationMinutes,
-        delayMinutes: Number(data.delayMinutes) || 0
-      });
-    });
-    return events;
-  }
-
-  function buildDailyRecords(events) {
-    const byEmployee = {};
-    for (const e of events) {
-      if (!byEmployee[e.employeeName]) byEmployee[e.employeeName] = [];
-      byEmployee[e.employeeName].push(e);
-    }
-
-    const dailyRecords = [];
-
-    for (const name of Object.keys(byEmployee)) {
-      const empEvents = byEmployee[name].sort((a, b) => a.timestamp - b.timestamp);
-      const byDay = {};
-      for (const ev of empEvents) {
-        const day = toDay(ev.timestamp);
-        if (!byDay[day]) byDay[day] = [];
-        byDay[day].push(ev);
-      }
-
-      for (const day of Object.keys(byDay)) {
-        const dayEvents = byDay[day];
-
-        // يوم إجازة: يتسجل بصفر ساعات ولا يُحتسب كساعات مفترضة
-        const leaveEvent = dayEvents.find((e) => e.type === "leave");
-        if (leaveEvent) {
-          dailyRecords.push({
-            employeeName: name,
-            date: day,
-            checkIn: null,
-            checkOut: null,
-            hours: 0,
-            isEstimated: false,
-            isLeave: true,
-            permissionMinutes: 0
-          });
-          continue;
-        }
-
-        const checkIn = dayEvents.find((e) => e.type === "check_in");
-        const checkOuts = dayEvents.filter((e) => e.type === "check_out");
-        const checkOut = checkOuts.length ? checkOuts[checkOuts.length - 1] : null;
-
-        // مجموع دقائق الاستئذان في اليوم (باستثناء "بدون عودة" اللي بيتعامل معاه كانصراف فعلي)
-        const permissionEvents = dayEvents.filter((e) => e.type === "permission");
-        const delayMinutes = dayEvents
-          .filter((e) => e.type === "delay")
-          .reduce((sum, e) => sum + (Number(e.delayMinutes) || 0), 0);
-        const noReturnPermission = permissionEvents.find((e) => e.durationMinutes === "no_return");
-        const timedPermissionMinutes = permissionEvents
-          .filter((e) => e.durationMinutes !== "no_return")
-          .reduce((sum, e) => sum + (parseInt(e.durationMinutes, 10) || 0), 0);
-
-        if (!checkIn) continue; // مفيش حضور أصلًا، مفيش حاجة نحسبها
-
-        let hours, isEstimated;
-        let effectiveCheckOut = checkOut;
-
-        // استئذان بدون عودة: نعامله كأنه وقت الانصراف الفعلي لو مفيش انصراف مسجل بعده
-        if (noReturnPermission && (!checkOut || noReturnPermission.timestamp > checkOut.timestamp)) {
-          effectiveCheckOut = noReturnPermission;
-        }
-
-        if (effectiveCheckOut) {
-          hours = (effectiveCheckOut.timestamp - checkIn.timestamp) / 3600000;
-          hours -= timedPermissionMinutes / 60;
-          hours -= delayMinutes / 60; // خصم مدة الاستئذان المحدد من ساعات اليوم
-          isEstimated = false;
-        } else {
-          hours = DEFAULT_WORK_HOURS - (timedPermissionMinutes / 60) - (delayMinutes / 60);
-          isEstimated = true;
-        }
-
-        dailyRecords.push({
-          employeeName: name,
-          date: day,
-          checkIn: checkIn.timestamp,
-          checkOut: effectiveCheckOut ? effectiveCheckOut.timestamp : null,
-          hours: Math.round(Math.max(0, hours) * 100) / 100,
-          isEstimated,
-          isLeave: false,
-          permissionMinutes: timedPermissionMinutes,
-          delayMinutes,
-          hasNoReturnPermission: !!noReturnPermission
-        });
-      }
-    }
-    return dailyRecords;
-  }
-
-  function buildWeeklySummary(dailyRecords) {
-    const weekMap = {};
-    for (const rec of dailyRecords) {
-      const weekStart = getWeekStart(new Date(rec.date));
-      const weekEnd = new Date(weekStart);
-      weekEnd.setDate(weekEnd.getDate() + 6);
-      const key = `${rec.employeeName}__${toDay(weekStart)}`;
-
-      if (!weekMap[key]) {
-        weekMap[key] = {
-          employeeName: rec.employeeName,
-          weekStart: toDay(weekStart),
-          weekEnd: toDay(weekEnd),
-          totalHours: 0,
-          daysWorked: 0,
-          daysEstimated: 0,
-          daysLeave: 0,
-          daysWithPermission: 0,
-          totalDelayMinutes: 0
-        };
-      }
-      weekMap[key].totalHours += rec.hours;
-      weekMap[key].daysWorked += 1;
-      if (rec.isEstimated) weekMap[key].daysEstimated += 1;
-      if (rec.isLeave) weekMap[key].daysLeave += 1;
-      if (rec.permissionMinutes > 0 || rec.hasNoReturnPermission) weekMap[key].daysWithPermission += 1;
-      weekMap[key].totalDelayMinutes += rec.delayMinutes || 0;
-    }
-
-    const result = Object.values(weekMap).map((w) => ({
-      ...w,
-      totalHours: Math.round(w.totalHours * 100) / 100,
-      totalDelayMinutes: w.totalDelayMinutes
-    }));
-
-    result.sort((a, b) => {
-      if (a.employeeName !== b.employeeName) return a.employeeName.localeCompare(b.employeeName, "ar");
-      return b.weekStart.localeCompare(a.weekStart); // الأحدث أولاً
-    });
-
-    return result;
-  }
-
-  function renderTable(weeklySummary) {
-    tableBody.innerHTML = "";
-    if (weeklySummary.length === 0) {
-      emptyEl.style.display = "block";
-      return;
-    }
-    emptyEl.style.display = "none";
-
-    for (const w of weeklySummary) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${w.employeeName}</td>
-        <td>${w.weekStart}</td>
-        <td>${w.weekEnd}</td>
-        <td class="num">${w.totalHours}</td>
-        <td class="num">${w.daysWorked}</td>
-        <td class="num ${w.daysEstimated > 0 ? "warn" : ""}">${w.daysEstimated}</td>
-        <td class="num ${w.totalDelayMinutes > 0 ? "warn" : ""}">${w.totalDelayMinutes} دقيقة</td>
-        <td class="num ${w.daysLeave > 0 ? "leave" : ""}">${w.daysLeave}</td>
-        <td class="num ${w.daysWithPermission > 0 ? "permission" : ""}">${w.daysWithPermission}</td>
-      `;
-      tableBody.appendChild(tr);
-    }
-  }
-
-  function exportToExcel() {
-    if (weeklySummaryCache.length === 0) return;
-
-    const rows = weeklySummaryCache.map((w) => ({
-      "اسم الموظف": w.employeeName,
-      "بداية الأسبوع": w.weekStart,
-      "نهاية الأسبوع": w.weekEnd,
-      "إجمالي الساعات": w.totalHours,
-      "عدد أيام الحضور": w.daysWorked,
-      "أيام بساعات مفترضة": w.daysEstimated,
-      "إجمالي التأخير بالدقائق": w.totalDelayMinutes,
-      "أيام إجازة": w.daysLeave,
-      "أيام فيها استئذان": w.daysWithPermission
-    }));
-
-    const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{ wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 16 }];
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "الملخص الأسبوعي");
-
-    const filename = `تقرير_الحضور_${toDay(new Date())}.xlsx`;
-    XLSX.writeFile(wb, filename);
-  }
-
-  async function init() {
-    try {
-      const events = await loadEvents();
-      const dailyRecords = buildDailyRecords(events);
-      const weeklySummary = buildWeeklySummary(dailyRecords);
-      weeklySummaryCache = weeklySummary;
-      renderTable(weeklySummary);
-    } catch (err) {
-      console.error(err);
-      loadingEl.textContent = "حصل خطأ في تحميل البيانات. تأكد من إعدادات Firebase.";
-      return;
-    }
-    loadingEl.style.display = "none";
-  }
-
-  exportBtn.addEventListener("click", exportToExcel);
-  init();
-</script>
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#2563eb">
 
 <style>
   :root {
@@ -280,6 +21,7 @@
     --sage: #8fa876;
     --sage-bright: #a4c187;
     --clay: #c97b5b;
+    --clay-bright: #db8d6c;
     --line: #3f4d43;
   }
 
@@ -291,136 +33,694 @@
     background: var(--bg);
     color: var(--paper);
     font-family: "Cairo", "Segoe UI", sans-serif;
-    padding: 28px 16px 60px;
+    padding: 20px 12px 60px;
   }
 
   .wrap {
-    max-width: 860px;
+    max-width: 900px;
     margin: 0 auto;
   }
 
-  .header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-    margin-bottom: 24px;
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
   }
 
   h1 {
-    font-size: 24px;
+    font-size: 22px;
     font-weight: 800;
-    margin: 0;
+    margin: 0 0 4px;
   }
-
-  .subtitle {
+  .sub {
     color: var(--paper-dim);
-    font-size: 14px;
-    margin-top: 4px;
+    font-size: 13px;
+    margin-bottom: 20px;
   }
 
-  button#exportBtn {
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: end;
+    margin-bottom: 8px;
+  }
+
+  .field { flex: 1; min-width: 140px; }
+  .field label {
+    display: block;
+    font-size: 13px;
+    color: var(--paper-dim);
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+  .field input[type="date"] {
+    width: 100%;
+    padding: 11px 12px;
+    font-size: 14px;
     font-family: inherit;
-    font-size: 15px;
-    font-weight: 700;
-    padding: 12px 22px;
+    color: var(--paper);
+    background: var(--surface-raised);
+    border: 1.5px solid var(--line);
     border-radius: 10px;
+  }
+  .field input[type="date"]:focus { outline: none; border-color: var(--sage); }
+
+  .btn {
+    font-family: inherit;
+    font-weight: 700;
     border: none;
-    background: var(--sage);
-    color: #16201a;
+    border-radius: 10px;
+    cursor: pointer;
+    padding: 11px 18px;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+  .btn-primary { background: var(--sage); color: #16201a; }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .btn-secondary {
+    background: rgba(143,168,118,0.15);
+    color: var(--sage-bright);
+    border: 1.5px solid var(--line);
+  }
+  .btn-secondary:hover:not(:disabled) { background: rgba(143,168,118,0.28); }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+
+  .quick-ranges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 10px 0 4px;
+  }
+  .quick-ranges button {
+    font-family: inherit;
+    font-size: 12px;
+    padding: 7px 12px;
+    border-radius: 20px;
+    border: 1.5px solid var(--line);
+    background: transparent;
+    color: var(--paper-dim);
     cursor: pointer;
   }
-  button#exportBtn:hover { filter: brightness(1.08); }
+  .quick-ranges button:hover { border-color: var(--sage); color: var(--sage-bright); }
 
-  .table-card {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    overflow: hidden;
+  .assumption {
+    font-size: 12px;
+    color: var(--paper-dim);
+    background: rgba(255,255,255,0.04);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 14px;
+    line-height: 1.7;
+  }
+
+  .conn-status {
+    font-size: 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    text-align: center;
+    font-weight: 700;
+  }
+  .conn-status.ok { background: rgba(143,168,118,0.15); color: var(--sage-bright); }
+  .conn-status.bad { background: rgba(201,123,91,0.18); color: var(--clay-bright); }
+  .conn-status.loading { background: rgba(255,255,255,0.06); color: var(--paper-dim); }
+
+  .actions-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
   }
 
   table {
     width: 100%;
     border-collapse: collapse;
+    font-size: 13px;
+  }
+  thead th {
+    text-align: right;
+    padding: 10px 10px;
+    color: var(--paper-dim);
+    font-weight: 700;
+    border-bottom: 2px solid var(--line);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 10px 10px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  tbody tr:hover { background: rgba(255,255,255,0.03); }
+  .num { font-variant-numeric: tabular-nums; direction: ltr; text-align: left; }
+  .name-cell { font-weight: 700; }
+  .table-scroll { overflow-x: auto; }
+
+  .total-row td {
+    font-weight: 800;
+    border-top: 2px solid var(--line);
+    border-bottom: none;
+    background: rgba(143,168,118,0.08);
+  }
+
+  .empty, .loading {
+    text-align: center;
+    padding: 30px;
+    color: var(--paper-dim);
     font-size: 14px;
   }
 
-  thead th {
-    text-align: right;
-    padding: 14px 16px;
-    background: var(--surface-raised);
+  .flag {
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    margin-inline-start: 5px;
+    display: inline-block;
+  }
+  .flag.warn { background: rgba(201,123,91,0.22); color: var(--clay-bright); }
+
+  .back-link {
+    display: inline-block;
+    margin-top: 6px;
     color: var(--paper-dim);
-    font-weight: 700;
     font-size: 13px;
-    border-bottom: 1px solid var(--line);
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--sage-bright); }
+
+  .detail-toggle {
+    font-size: 12px;
+    color: var(--sage-bright);
+    cursor: pointer;
+    text-decoration: underline;
+    background: none;
+    border: none;
+    font-family: inherit;
+    padding: 0;
   }
 
-  tbody td {
-    padding: 13px 16px;
-    border-bottom: 1px solid var(--line);
-  }
-
-  tbody tr:last-child td { border-bottom: none; }
-
-  td.num { font-variant-numeric: tabular-nums; }
-  td.warn { color: var(--clay); font-weight: 700; }
-  td.leave { color: var(--sage-bright); font-weight: 700; }
-  td.permission { color: #d9c15b; font-weight: 700; }
-
-  #loading, #empty {
-    padding: 40px 16px;
-    text-align: center;
+  .detail-panel {
+    display: none;
+    margin-top: 6px;
+    padding: 10px 12px;
+    background: var(--surface-raised);
+    border-radius: 8px;
+    font-size: 12px;
     color: var(--paper-dim);
   }
-  #empty { display: none; }
+  .detail-panel.show { display: block; }
+  .detail-panel div { padding: 3px 0; border-bottom: 1px dashed var(--line); }
+  .detail-panel div:last-child { border-bottom: none; }
 </style>
-
-<link rel="manifest" href="./manifest.json">
-<meta name="theme-color" content="#2563eb">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="الحضور والانصراف">
-<link rel="apple-touch-icon" href="./icons/icon-192.png">
 </head>
 <body>
-  <div class="wrap">
-    <div class="header">
-      <div>
-        <h1>الملخص الأسبوعي</h1>
-        <div class="subtitle">ساعات العمل الفعلية لكل موظف — تعليمات الترعة</div>
+<div class="wrap">
+
+  <div class="card">
+    <h1>📊 التقرير الأسبوعي للحضور والانصراف</h1>
+    <div class="sub">تعليمات الترعة</div>
+    <div id="connStatus" class="conn-status loading">جاري التحقق من الاتصال بقاعدة البيانات...</div>
+
+    <div class="controls">
+      <div class="field">
+        <label for="fromDate">من تاريخ</label>
+        <input type="date" id="fromDate">
       </div>
-      <button id="exportBtn">⬇ تصدير Excel</button>
+      <div class="field">
+        <label for="toDate">إلى تاريخ</label>
+        <input type="date" id="toDate">
+      </div>
+      <button class="btn btn-primary" id="loadBtn">عرض التقرير</button>
     </div>
 
-    <div class="table-card">
-      <div id="loading">جاري تحميل البيانات...</div>
-      <div id="empty">لا توجد بيانات حضور مسجلة بعد.</div>
-      <table>
-        <thead>
-          <tr>
-            <th>الموظف</th>
-            <th>بداية الأسبوع</th>
-            <th>نهاية الأسبوع</th>
-            <th>إجمالي الساعات</th>
-            <th>أيام الحضور</th>
-            <th>أيام مفترضة</th>
-            <th>إجمالي التأخير</th>
-            <th>أيام إجازة</th>
-            <th>أيام استئذان</th>
-          </tr>
-        </thead>
-        <tbody id="tableBody"></tbody>
-      </table>
+    <div class="quick-ranges">
+      <button data-range="this_week">الأسبوع الحالي</button>
+      <button data-range="last_week">الأسبوع الماضي</button>
+      <button data-range="this_month">الشهر الحالي</button>
+      <button data-range="last_30">آخر 30 يوم</button>
+    </div>
+
+    <div class="assumption">
+      ⚠️ <strong>ملحوظة على طريقة الحساب:</strong> لو موظف سجّل حضور بدون انصراف مقابل في نفس اليوم، بيتم افتراض <strong>8 ساعات عمل</strong> تلقائيًا من وقت الحضور (الأيام دي هتتحدد بعلامة "⚠ بدون انصراف" في التفاصيل). دقائق التأخير والاستئذان وأيام الإجازة (8 ساعات لكل يوم إجازة) بتتخصم كلها من إجمالي ساعات العمل للوصول للساعات الصافية.
     </div>
   </div>
 
-<script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(console.error);
+  <div class="card">
+    <div class="actions-row">
+      <div id="rangeLabel" style="font-weight:700; font-size:14px;"></div>
+      <button class="btn btn-secondary" id="exportBtn" disabled>⬇ تنزيل Excel</button>
+    </div>
+    <div class="table-scroll">
+      <table id="reportTable" style="display:none;">
+        <thead>
+          <tr>
+            <th>الموظف</th>
+            <th>أيام الحضور</th>
+            <th>ساعات العمل الإجمالية</th>
+            <th>خصم التأخير</th>
+            <th>خصم الاستئذان</th>
+            <th>خصم الإجازات</th>
+            <th>الساعات الصافية</th>
+            <th>إجازات</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="reportBody"></tbody>
+      </table>
+      <div id="reportEmpty" class="empty">اختر الفترة واضغط "عرض التقرير"</div>
+    </div>
+    <a href="admin.html" class="back-link">→ إدارة الموظفين</a>
+    &nbsp;·&nbsp;
+    <a href="index.html" class="back-link">→ صفحة تسجيل الحضور</a>
+  </div>
+
+</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getFirestore, collection, query, where, orderBy, getDocs, Timestamp
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBGSGTSL-lVdx54BIECEbbVljXuqCjuu_4",
+    authDomain: "attendance-terra.firebaseapp.com",
+    projectId: "attendance-terra",
+    storageBucket: "attendance-terra.firebasestorage.app",
+    messagingSenderId: "403868956775",
+    appId: "1:403868956775:web:1cefb35a53c72033057cc2"
+  };
+
+  // ⚠️ لو موظف نسي يسجل انصراف، هيتحسب له هذا العدد من الساعات تلقائيًا من وقت الحضور
+  const DEFAULT_HOURS_IF_NO_CHECKOUT = 8;
+
+  const connStatus = document.getElementById("connStatus");
+  let db;
+  try {
+    const app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    connStatus.textContent = "✓ تم الاتصال بقاعدة البيانات";
+    connStatus.className = "conn-status ok";
+  } catch (err) {
+    connStatus.textContent = "✗ فشل الاتصال: " + err.message;
+    connStatus.className = "conn-status bad";
+  }
+
+  const EVENTS_COLLECTION = "attendance_events";
+
+  const fromDateInput = document.getElementById("fromDate");
+  const toDateInput = document.getElementById("toDate");
+  const loadBtn = document.getElementById("loadBtn");
+  const exportBtn = document.getElementById("exportBtn");
+  const reportTable = document.getElementById("reportTable");
+  const reportBody = document.getElementById("reportBody");
+  const reportEmpty = document.getElementById("reportEmpty");
+  const rangeLabel = document.getElementById("rangeLabel");
+
+  // ---------------------------------------------------------------
+  // تحديد نطاق تاريخ افتراضي: الأسبوع الحالي (من السبت للجمعة)
+  // ---------------------------------------------------------------
+  function startOfWeek(d) {
+    const date = new Date(d);
+    const day = date.getDay(); // 0 = Sunday ... 6 = Saturday
+    const diff = (day + 1) % 7; // نخلي السبت هو أول يوم بالأسبوع
+    date.setDate(date.getDate() - diff);
+    date.setHours(0, 0, 0, 0);
+    return date;
+  }
+
+  function toInputDate(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function setRange(from, to) {
+    fromDateInput.value = toInputDate(from);
+    toDateInput.value = toInputDate(to);
+  }
+
+  document.querySelectorAll(".quick-ranges button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const today = new Date();
+      const range = btn.dataset.range;
+      if (range === "this_week") {
+        const start = startOfWeek(today);
+        const end = new Date(start);
+        end.setDate(end.getDate() + 6);
+        setRange(start, end);
+      } else if (range === "last_week") {
+        const start = startOfWeek(today);
+        start.setDate(start.getDate() - 7);
+        const end = new Date(start);
+        end.setDate(end.getDate() + 6);
+        setRange(start, end);
+      } else if (range === "this_month") {
+        const start = new Date(today.getFullYear(), today.getMonth(), 1);
+        const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+        setRange(start, end);
+      } else if (range === "last_30") {
+        const end = new Date(today);
+        const start = new Date(today);
+        start.setDate(start.getDate() - 29);
+        setRange(start, end);
+      }
+      loadReport();
+    });
   });
-}
+
+  // نطاق افتراضي أول تحميل: الأسبوع الحالي
+  (function initDefaultRange() {
+    const start = startOfWeek(new Date());
+    const end = new Date(start);
+    end.setDate(end.getDate() + 6);
+    setRange(start, end);
+  })();
+
+  function formatHM(hoursDecimal) {
+    const sign = hoursDecimal < 0 ? "-" : "";
+    const abs = Math.abs(hoursDecimal);
+    const h = Math.floor(abs);
+    const m = Math.round((abs - h) * 60);
+    return `${sign}${h} س ${m > 0 ? m + " د" : ""}`.trim();
+  }
+
+  function eventDateObj(ev) {
+    if (ev.timestamp && typeof ev.timestamp.toDate === "function") return ev.timestamp.toDate();
+    return new Date(ev.clientTime);
+  }
+
+  // ---------------------------------------------------------------
+  // المنطق الأساسي: تجميع الأحداث لكل موظف وحساب الساعات
+  // ---------------------------------------------------------------
+  function computeReport(events) {
+    // تجميع حسب الموظف
+    const byEmployee = {};
+    events.forEach((ev) => {
+      if (!byEmployee[ev.employeeName]) byEmployee[ev.employeeName] = [];
+      byEmployee[ev.employeeName].push(ev);
+    });
+
+    const results = [];
+
+    Object.keys(byEmployee).sort().forEach((name) => {
+      const evs = byEmployee[name].sort((a, b) => eventDateObj(a) - eventDateObj(b));
+
+      // تقسيم الأحداث حسب اليوم (تاريخ محلي)
+      const byDay = {};
+      evs.forEach((ev) => {
+        const d = eventDateObj(ev);
+        const key = toInputDate(d);
+        if (!byDay[key]) byDay[key] = [];
+        byDay[key].push(ev);
+      });
+
+      let totalWorkedHours = 0;
+      let totalDelayMinutes = 0;
+      let totalPermissionMinutes = 0;
+      let leaveDays = 0;
+      let presentDays = 0;
+      const dayDetails = [];
+
+      Object.keys(byDay).sort().forEach((dayKey) => {
+        const dayEvents = byDay[dayKey];
+        const checkIn = dayEvents.find((e) => e.type === "check_in");
+        const checkOut = [...dayEvents].reverse().find((e) => e.type === "check_out");
+        const delays = dayEvents.filter((e) => e.type === "delay");
+        const permissions = dayEvents.filter((e) => e.type === "permission");
+        const leaves = dayEvents.filter((e) => e.type === "leave");
+
+        delays.forEach((d) => { totalDelayMinutes += Number(d.delayMinutes) || 0; });
+        permissions.forEach((p) => {
+          const dur = p.durationMinutes;
+          if (dur === "no_return") {
+            // استئذان بدون عودة: نحسبه لاحقًا كخصم كامل لو مفيش انصراف مسجل
+          } else {
+            totalPermissionMinutes += Number(dur) || 0;
+          }
+        });
+        if (leaves.length > 0) leaveDays += 1;
+
+        if (checkIn) {
+          presentDays += 1;
+          const inTime = eventDateObj(checkIn);
+          let outTime;
+          let noCheckout = false;
+          if (checkOut) {
+            outTime = eventDateObj(checkOut);
+          } else {
+            outTime = new Date(inTime.getTime() + DEFAULT_HOURS_IF_NO_CHECKOUT * 3600 * 1000);
+            noCheckout = true;
+          }
+          let hours = (outTime - inTime) / 3600000;
+          if (hours < 0) hours = 0;
+          totalWorkedHours += hours;
+
+          dayDetails.push({
+            date: dayKey,
+            checkIn: inTime,
+            checkOut: noCheckout ? null : outTime,
+            hours,
+            noCheckout,
+            delayMin: delays.reduce((s, d) => s + (Number(d.delayMinutes) || 0), 0),
+            permissionNote: permissions.map(p => p.durationMinutes === "no_return" ? "استئذان بدون عودة" : `استئذان ${p.durationMinutes} د`).join("، ")
+          });
+        } else if (leaves.length > 0) {
+          dayDetails.push({ date: dayKey, leave: true });
+        }
+      });
+
+      const delayHours = totalDelayMinutes / 60;
+      const permissionHours = totalPermissionMinutes / 60;
+      const leaveHours = leaveDays * DEFAULT_HOURS_IF_NO_CHECKOUT;
+      const netHours = Math.max(0, totalWorkedHours - delayHours - permissionHours - leaveHours);
+
+      results.push({
+        name,
+        presentDays,
+        leaveDays,
+        totalWorkedHours,
+        delayHours,
+        permissionHours,
+        leaveHours,
+        netHours,
+        dayDetails
+      });
+    });
+
+    return results;
+  }
+
+  // ---------------------------------------------------------------
+  // تحميل البيانات من Firestore وعرضها
+  // ---------------------------------------------------------------
+  let lastResults = [];
+  let lastRangeText = "";
+
+  async function loadReport() {
+    const fromVal = fromDateInput.value;
+    const toVal = toDateInput.value;
+    if (!fromVal || !toVal) return;
+
+    loadBtn.disabled = true;
+    loadBtn.textContent = "جاري التحميل...";
+    reportTable.style.display = "none";
+    reportEmpty.style.display = "block";
+    reportEmpty.textContent = "جاري تحميل البيانات...";
+
+    const fromDate = new Date(fromVal + "T00:00:00");
+    const toDate = new Date(toVal + "T23:59:59");
+
+    try {
+      const q = query(
+        collection(db, EVENTS_COLLECTION),
+        where("timestamp", ">=", Timestamp.fromDate(fromDate)),
+        where("timestamp", "<=", Timestamp.fromDate(toDate)),
+        orderBy("timestamp", "asc")
+      );
+      const snap = await getDocs(q);
+      const events = snap.docs.map((d) => d.data());
+
+      lastResults = computeReport(events);
+      lastRangeText = `من ${fromVal} إلى ${toVal}`;
+      rangeLabel.textContent = lastRangeText;
+      renderTable(lastResults);
+
+      if (lastResults.length === 0) {
+        reportTable.style.display = "none";
+        reportEmpty.style.display = "block";
+        reportEmpty.textContent = "لا يوجد بيانات حضور في الفترة دي";
+        exportBtn.disabled = true;
+      } else {
+        reportTable.style.display = "table";
+        reportEmpty.style.display = "none";
+        exportBtn.disabled = false;
+      }
+    } catch (err) {
+      console.error(err);
+      reportEmpty.textContent = "حصل خطأ في تحميل البيانات: " + err.message;
+      reportEmpty.style.display = "block";
+      reportTable.style.display = "none";
+      exportBtn.disabled = true;
+    }
+
+    loadBtn.disabled = false;
+    loadBtn.textContent = "عرض التقرير";
+  }
+
+  function renderTable(results) {
+    reportBody.innerHTML = "";
+
+    let sumWorked = 0, sumDelay = 0, sumPermission = 0, sumLeaveHours = 0, sumNet = 0, sumDays = 0, sumLeave = 0;
+
+    results.forEach((r, idx) => {
+      sumWorked += r.totalWorkedHours;
+      sumDelay += r.delayHours;
+      sumPermission += r.permissionHours;
+      sumLeaveHours += r.leaveHours;
+      sumNet += r.netHours;
+      sumDays += r.presentDays;
+      sumLeave += r.leaveDays;
+
+      const hasNoCheckout = r.dayDetails.some(d => d.noCheckout);
+
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td class="name-cell">${escapeHtml(r.name)}</td>
+        <td class="num">${r.presentDays}</td>
+        <td class="num">${formatHM(r.totalWorkedHours)}</td>
+        <td class="num">${r.delayHours > 0 ? "-" + formatHM(r.delayHours) : "—"}</td>
+        <td class="num">${r.permissionHours > 0 ? "-" + formatHM(r.permissionHours) : "—"}</td>
+        <td class="num">${r.leaveHours > 0 ? "-" + formatHM(r.leaveHours) : "—"}</td>
+        <td class="num"><strong>${formatHM(r.netHours)}</strong>${hasNoCheckout ? '<span class="flag warn">⚠ بدون انصراف</span>' : ""}</td>
+        <td class="num">${r.leaveDays || "—"}</td>
+        <td><button class="detail-toggle" data-idx="${idx}">تفاصيل</button></td>
+      `;
+      reportBody.appendChild(row);
+
+      const detailRow = document.createElement("tr");
+      const detailCell = document.createElement("td");
+      detailCell.colSpan = 9;
+      detailCell.style.border = "none";
+      detailCell.style.paddingTop = "0";
+      const panel = document.createElement("div");
+      panel.className = "detail-panel";
+      panel.id = `detail-${idx}`;
+      if (r.dayDetails.length === 0) {
+        panel.innerHTML = `<div>لا يوجد تفاصيل</div>`;
+      } else {
+        panel.innerHTML = r.dayDetails.map((d) => {
+          if (d.leave) return `<div>${d.date}: إجازة</div>`;
+          const inStr = d.checkIn.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
+          const outStr = d.checkOut ? d.checkOut.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }) : "—";
+          const extra = [];
+          if (d.noCheckout) extra.push(`⚠ بدون انصراف (افتُرض ${DEFAULT_HOURS_IF_NO_CHECKOUT} ساعات)`);
+          if (d.delayMin > 0) extra.push(`تأخير ${d.delayMin} د`);
+          if (d.permissionNote) extra.push(d.permissionNote);
+          return `<div>${d.date}: ${inStr} → ${outStr} (${formatHM(d.hours)})${extra.length ? " — " + extra.join("، ") : ""}</div>`;
+        }).join("");
+      }
+      detailCell.appendChild(panel);
+      detailRow.appendChild(detailCell);
+      reportBody.appendChild(detailRow);
+    });
+
+    document.querySelectorAll(".detail-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const panel = document.getElementById(`detail-${btn.dataset.idx}`);
+        panel.classList.toggle("show");
+        btn.textContent = panel.classList.contains("show") ? "إخفاء" : "تفاصيل";
+      });
+    });
+
+    const totalRow = document.createElement("tr");
+    totalRow.className = "total-row";
+    totalRow.innerHTML = `
+      <td>الإجمالي</td>
+      <td class="num">${sumDays}</td>
+      <td class="num">${formatHM(sumWorked)}</td>
+      <td class="num">${sumDelay > 0 ? "-" + formatHM(sumDelay) : "—"}</td>
+      <td class="num">${sumPermission > 0 ? "-" + formatHM(sumPermission) : "—"}</td>
+      <td class="num">${sumLeaveHours > 0 ? "-" + formatHM(sumLeaveHours) : "—"}</td>
+      <td class="num">${formatHM(sumNet)}</td>
+      <td class="num">${sumLeave || "—"}</td>
+      <td></td>
+    `;
+    reportBody.appendChild(totalRow);
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // ---------------------------------------------------------------
+  // تصدير Excel
+  // ---------------------------------------------------------------
+  exportBtn.addEventListener("click", () => {
+    if (lastResults.length === 0) return;
+
+    const rows = lastResults.map((r) => ({
+      "الموظف": r.name,
+      "أيام الحضور": r.presentDays,
+      "ساعات العمل الإجمالية": Number(r.totalWorkedHours.toFixed(2)),
+      "خصم التأخير (ساعة)": Number(r.delayHours.toFixed(2)),
+      "خصم الاستئذان (ساعة)": Number(r.permissionHours.toFixed(2)),
+      "خصم الإجازات (ساعة)": Number(r.leaveHours.toFixed(2)),
+      "الساعات الصافية": Number(r.netHours.toFixed(2)),
+      "أيام الإجازة": r.leaveDays,
+      "ملاحظات": r.dayDetails.some(d => d.noCheckout) ? "يوجد أيام بدون تسجيل انصراف" : ""
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [
+      { wch: 20 }, { wch: 12 }, { wch: 20 }, { wch: 16 },
+      { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 12 }, { wch: 28 }
+    ];
+
+    // شيت تفصيلي إضافي
+    const detailRows = [];
+    lastResults.forEach((r) => {
+      r.dayDetails.forEach((d) => {
+        if (d.leave) {
+          detailRows.push({ "الموظف": r.name, "اليوم": d.date, "النوع": "إجازة" });
+          return;
+        }
+        detailRows.push({
+          "الموظف": r.name,
+          "اليوم": d.date,
+          "وقت الحضور": d.checkIn.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }),
+          "وقت الانصراف": d.checkOut ? d.checkOut.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }) : "بدون تسجيل",
+          "الساعات": Number(d.hours.toFixed(2)),
+          "تأخير (دقيقة)": d.delayMin || 0,
+          "استئذان": d.permissionNote || ""
+        });
+      });
+    });
+    const wsDetail = XLSX.utils.json_to_sheet(detailRows);
+    wsDetail["!cols"] = [
+      { wch: 20 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 10 }, { wch: 14 }, { wch: 20 }
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "الملخص");
+    XLSX.utils.book_append_sheet(wb, wsDetail, "التفاصيل اليومية");
+
+    const filename = `تقرير_الحضور_${fromDateInput.value}_الى_${toDateInput.value}.xlsx`;
+    XLSX.writeFile(wb, filename);
+  });
+
+  loadBtn.addEventListener("click", loadReport);
+
+  // تحميل أولي
+  loadReport();
 </script>
 </body>
 </html>
