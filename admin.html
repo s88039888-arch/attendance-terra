@@ -7,180 +7,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
 
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
-  import {
-    getFirestore, doc, getDoc, setDoc, deleteDoc
-  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
-
-  const firebaseConfig = {
-    apiKey: "AIzaSyBGSGTSL-lVdx54BIECEbbVljXuqCjuu_4",
-    authDomain: "attendance-terra.firebaseapp.com",
-    projectId: "attendance-terra",
-    storageBucket: "attendance-terra.firebasestorage.app",
-    messagingSenderId: "403868956775",
-    appId: "1:403868956775:web:1cefb35a53c72033057cc2"
-  };
-
-  // ⚠️ كلمة سر صفحة الإدارة — لو عايز تغيّرها، بدّل القيمة هنا
-  const ADMIN_PASSWORD = "sweethome2026";
-
-  // أسماء افتراضية أول مرة بس (لو القائمة في القاعدة لسه فاضية)
-  const DEFAULT_EMPLOYEES = [
-    "يويو", "Hagoraa", "Nermin", "Y", "eldeeb", "اسلام الشربيني", "جمعه انور محمد"
-  ];
-
-  const app = initializeApp(firebaseConfig);
-  const db = getFirestore(app);
-  const CONFIG_DOC = doc(db, "app_config", "employees");
-  const AUTH_COLLECTION = "employee_auth";
-
-  // ---------------------------------------------------------------
-  // شاشة الدخول بكلمة السر
-  // ---------------------------------------------------------------
-  const loginScreen = document.getElementById("loginScreen");
-  const adminScreen = document.getElementById("adminScreen");
-  const passwordInput = document.getElementById("passwordInput");
-  const loginBtn = document.getElementById("loginBtn");
-  const loginError = document.getElementById("loginError");
-
-  loginBtn.addEventListener("click", tryLogin);
-  passwordInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") tryLogin();
-  });
-
-  function tryLogin() {
-    if (passwordInput.value === ADMIN_PASSWORD) {
-      loginScreen.style.display = "none";
-      adminScreen.style.display = "block";
-      loadEmployees();
-    } else {
-      loginError.textContent = "كلمة السر غير صحيحة";
-      loginError.classList.add("show");
-      passwordInput.value = "";
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // إدارة قائمة الموظفين
-  // ---------------------------------------------------------------
-  const employeeList = document.getElementById("employeeList");
-  const newNameInput = document.getElementById("newNameInput");
-  const addBtn = document.getElementById("addBtn");
-  const saveStatus = document.getElementById("saveStatus");
-
-  let currentEmployees = [];
-
-  async function loadEmployees() {
-    employeeList.innerHTML = `<div class="loading">جاري التحميل...</div>`;
-    try {
-      const snap = await getDoc(CONFIG_DOC);
-      if (snap.exists() && Array.isArray(snap.data().names)) {
-        currentEmployees = snap.data().names;
-      } else {
-        // أول مرة: نستخدم القائمة الافتراضية ونحفظها
-        currentEmployees = [...DEFAULT_EMPLOYEES];
-        await saveEmployees(false);
-      }
-    } catch (err) {
-      console.error(err);
-      currentEmployees = [...DEFAULT_EMPLOYEES];
-    }
-    renderList();
-  }
-
-  function renderList() {
-    if (currentEmployees.length === 0) {
-      employeeList.innerHTML = `<div class="empty">لا يوجد موظفين مضافين بعد</div>`;
-      return;
-    }
-    employeeList.innerHTML = "";
-    currentEmployees.forEach((name, index) => {
-      const row = document.createElement("div");
-      row.className = "employee-row";
-      row.innerHTML = `
-        <span class="employee-name">${escapeHtml(name)}</span>
-        <div class="row-actions">
-          <button class="reset-btn" data-index="${index}">إعادة ضبط الباسورد</button>
-          <button class="delete-btn" data-index="${index}">حذف</button>
-        </div>
-      `;
-      employeeList.appendChild(row);
-    });
-
-    document.querySelectorAll(".delete-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const idx = parseInt(btn.dataset.index, 10);
-        const name = currentEmployees[idx];
-        if (confirm(`متأكد إنك عايز تمسح "${name}"؟ (هيتم مسح الباسورد بتاعه كمان)`)) {
-          currentEmployees.splice(idx, 1);
-          renderList();
-          await saveEmployees(true);
-          try {
-            await deleteDoc(doc(db, AUTH_COLLECTION, name));
-          } catch (err) {
-            console.error("تعذر مسح بيانات الدخول القديمة:", err);
-          }
-        }
-      });
-    });
-
-    document.querySelectorAll(".reset-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const idx = parseInt(btn.dataset.index, 10);
-        const name = currentEmployees[idx];
-        if (!confirm(`تصفير باسورد "${name}"؟ هيقدر يعمل باسورد جديد أول ما يدخل تاني.`)) return;
-        try {
-          await deleteDoc(doc(db, AUTH_COLLECTION, name));
-          showStatus(`تم تصفير باسورد ${name}`, "success");
-        } catch (err) {
-          console.error(err);
-          showStatus("حصل خطأ، حاول تاني", "error");
-        }
-      });
-    });
-  }
-
-  function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
-  }
-
-  async function addEmployee() {
-    const name = newNameInput.value.trim();
-    if (!name) return;
-    if (currentEmployees.includes(name)) {
-      showStatus("الاسم ده موجود بالفعل", "error");
-      return;
-    }
-    currentEmployees.push(name);
-    newNameInput.value = "";
-    renderList();
-    await saveEmployees(true);
-  }
-
-  async function saveEmployees(showMessage) {
-    try {
-      await setDoc(CONFIG_DOC, { names: currentEmployees, updatedAt: new Date().toISOString() });
-      if (showMessage) showStatus("تم الحفظ بنجاح", "success");
-    } catch (err) {
-      console.error(err);
-      if (showMessage) showStatus("حصل خطأ في الحفظ، حاول تاني", "error");
-    }
-  }
-
-  function showStatus(message, kind) {
-    saveStatus.textContent = message;
-    saveStatus.className = "save-status show " + kind;
-    setTimeout(() => saveStatus.classList.remove("show"), 2500);
-  }
-
-  addBtn.addEventListener("click", addEmployee);
-  newNameInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") addEmployee();
-  });
-</script>
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#2563eb">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="الحضور والانصراف">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
 
 <style>
   :root {
@@ -254,6 +86,7 @@
     border-radius: 12px;
     cursor: pointer;
   }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
 
   #loginBtn {
     width: 100%;
@@ -262,7 +95,7 @@
     background: var(--sage);
     color: #16201a;
   }
-  #loginBtn:hover { filter: brightness(1.08); }
+  #loginBtn:hover:not(:disabled) { filter: brightness(1.08); }
 
   .error-msg {
     color: var(--clay-bright);
@@ -276,10 +109,22 @@
 
   #adminScreen { display: none; }
 
+  .conn-status {
+    font-size: 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    text-align: center;
+    font-weight: 700;
+  }
+  .conn-status.ok { background: rgba(143,168,118,0.15); color: var(--sage-bright); }
+  .conn-status.bad { background: rgba(201,123,91,0.18); color: var(--clay-bright); }
+  .conn-status.loading { background: rgba(255,255,255,0.06); color: var(--paper-dim); }
+
   .add-row {
     display: flex;
     gap: 10px;
-    margin-bottom: 20px;
+    margin-bottom: 12px;
   }
   .add-row input { margin-bottom: 0; flex: 1; }
   .add-row button {
@@ -289,7 +134,7 @@
     font-size: 15px;
     white-space: nowrap;
   }
-  .add-row button:hover { filter: brightness(1.08); }
+  .add-row button:hover:not(:disabled) { filter: brightness(1.08); }
 
   .employee-list {
     display: flex;
@@ -328,7 +173,7 @@
     font-size: 12px;
     white-space: nowrap;
   }
-  .reset-btn:hover { background: rgba(143,168,118,0.28); }
+  .reset-btn:hover:not(:disabled) { background: rgba(143,168,118,0.28); }
 
   .delete-btn {
     padding: 8px 14px;
@@ -336,7 +181,7 @@
     color: var(--clay-bright);
     font-size: 13px;
   }
-  .delete-btn:hover { background: rgba(201,123,91,0.3); }
+  .delete-btn:hover:not(:disabled) { background: rgba(201,123,91,0.3); }
 
   .loading, .empty {
     padding: 20px;
@@ -355,8 +200,9 @@
     max-height: 0;
     overflow: hidden;
     transition: opacity 0.25s, max-height 0.25s;
+    word-break: break-word;
   }
-  .save-status.show { opacity: 1; max-height: 50px; margin-top: 8px; }
+  .save-status.show { opacity: 1; max-height: 200px; margin-top: 8px; }
   .save-status.success { background: rgba(143,168,118,0.18); color: var(--sage-bright); }
   .save-status.error { background: rgba(201,123,91,0.18); color: var(--clay-bright); }
 
@@ -368,19 +214,29 @@
     font-size: 13px;
     text-decoration: none;
   }
-</style>
 
-<link rel="manifest" href="./manifest.json">
-<meta name="theme-color" content="#2563eb">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="الحضور والانصراف">
-<link rel="apple-touch-icon" href="./icons/icon-192.png">
+  .debug-box {
+    margin-top: 16px;
+    padding: 10px 12px;
+    background: #14100c;
+    border-radius: 8px;
+    font-family: monospace;
+    font-size: 11px;
+    color: #ffb08a;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 150px;
+    overflow-y: auto;
+    display: none;
+  }
+  .debug-box.show { display: block; }
+</style>
 </head>
 <body>
 
   <div id="loginScreen" class="card">
     <h1>🔒 إدارة الموظفين</h1>
+    <div id="connStatus" class="conn-status loading">جاري التحقق من الاتصال بقاعدة البيانات...</div>
     <label for="passwordInput">كلمة السر</label>
     <input type="password" id="passwordInput" placeholder="ادخل كلمة السر">
     <div class="error-msg" id="loginError"></div>
@@ -397,17 +253,259 @@
 
     <div class="employee-list" id="employeeList"></div>
     <div class="save-status" id="saveStatus"></div>
+    <div class="debug-box" id="debugBox"></div>
 
     <a href="index.html" class="back-link">→ الرجوع لصفحة تسجيل الحضور</a>
   </div>
 
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, deleteDoc, enableNetwork
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBGSGTSL-lVdx54BIECEbbVljXuqCjuu_4",
+    authDomain: "attendance-terra.firebaseapp.com",
+    projectId: "attendance-terra",
+    storageBucket: "attendance-terra.firebasestorage.app",
+    messagingSenderId: "403868956775",
+    appId: "1:403868956775:web:1cefb35a53c72033057cc2"
+  };
+
+  // ⚠️ كلمة سر صفحة الإدارة — لو عايز تغيّرها، بدّل القيمة هنا
+  const ADMIN_PASSWORD = "sweethome2026";
+
+  // أسماء افتراضية أول مرة بس (لو القائمة في القاعدة لسه فاضية)
+  const DEFAULT_EMPLOYEES = [
+    "يويو", "Hagoraa", "Nermin", "Y", "eldeeb", "اسلام الشربيني", "جمعه انور محمد"
+  ];
+
+  let app, db;
+  let firebaseReady = false;
+
+  const connStatus = document.getElementById("connStatus");
+  const debugBox = document.getElementById("debugBox");
+
+  function logDebug(msg) {
+    console.log(msg);
+    debugBox.classList.add("show");
+    debugBox.textContent += msg + "\n";
+  }
+
+  try {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    firebaseReady = true;
+    connStatus.textContent = "✓ تم الاتصال بقاعدة البيانات";
+    connStatus.className = "conn-status ok";
+  } catch (err) {
+    firebaseReady = false;
+    connStatus.textContent = "✗ فشل الاتصال بـ Firebase: " + err.message;
+    connStatus.className = "conn-status bad";
+    logDebug("Firebase init error: " + err.message);
+  }
+
+  const CONFIG_DOC = firebaseReady ? doc(db, "app_config", "employees") : null;
+  const AUTH_COLLECTION = "employee_auth";
+
+  // ---------------------------------------------------------------
+  // شاشة الدخول بكلمة السر
+  // ---------------------------------------------------------------
+  const loginScreen = document.getElementById("loginScreen");
+  const adminScreen = document.getElementById("adminScreen");
+  const passwordInput = document.getElementById("passwordInput");
+  const loginBtn = document.getElementById("loginBtn");
+  const loginError = document.getElementById("loginError");
+
+  loginBtn.addEventListener("click", tryLogin);
+  passwordInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") tryLogin();
+  });
+
+  function tryLogin() {
+    if (!firebaseReady) {
+      loginError.textContent = "لا يمكن الدخول: فشل الاتصال بقاعدة البيانات";
+      loginError.classList.add("show");
+      return;
+    }
+    if (passwordInput.value === ADMIN_PASSWORD) {
+      loginScreen.style.display = "none";
+      adminScreen.style.display = "block";
+      loadEmployees();
+    } else {
+      loginError.textContent = "كلمة السر غير صحيحة";
+      loginError.classList.add("show");
+      passwordInput.value = "";
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // إدارة قائمة الموظفين
+  // ---------------------------------------------------------------
+  const employeeList = document.getElementById("employeeList");
+  const newNameInput = document.getElementById("newNameInput");
+  const addBtn = document.getElementById("addBtn");
+  const saveStatus = document.getElementById("saveStatus");
+
+  let currentEmployees = [];
+  let busy = false;
+
+  function setBusy(state) {
+    busy = state;
+    addBtn.disabled = state;
+    newNameInput.disabled = state;
+    document.querySelectorAll(".delete-btn, .reset-btn").forEach(b => b.disabled = state);
+  }
+
+  async function loadEmployees() {
+    employeeList.innerHTML = `<div class="loading">جاري التحميل...</div>`;
+    try {
+      const snap = await getDoc(CONFIG_DOC);
+      if (snap.exists() && Array.isArray(snap.data().names)) {
+        currentEmployees = snap.data().names;
+        logDebug("تم تحميل " + currentEmployees.length + " موظف من قاعدة البيانات.");
+      } else {
+        // أول مرة: نستخدم القائمة الافتراضية ونحفظها
+        currentEmployees = [...DEFAULT_EMPLOYEES];
+        logDebug("لا يوجد مستند سابق، سيتم إنشاء واحد بالقائمة الافتراضية.");
+        await saveEmployees(false);
+      }
+    } catch (err) {
+      console.error(err);
+      logDebug("خطأ أثناء تحميل الموظفين: " + err.code + " — " + err.message);
+      showStatus("تعذر تحميل القائمة من قاعدة البيانات: " + err.message, "error");
+      currentEmployees = [...DEFAULT_EMPLOYEES];
+    }
+    renderList();
+  }
+
+  function renderList() {
+    if (currentEmployees.length === 0) {
+      employeeList.innerHTML = `<div class="empty">لا يوجد موظفين مضافين بعد</div>`;
+      return;
+    }
+    employeeList.innerHTML = "";
+    currentEmployees.forEach((name, index) => {
+      const row = document.createElement("div");
+      row.className = "employee-row";
+      row.innerHTML = `
+        <span class="employee-name">${escapeHtml(name)}</span>
+        <div class="row-actions">
+          <button class="reset-btn" data-index="${index}">إعادة ضبط الباسورد</button>
+          <button class="delete-btn" data-index="${index}">حذف</button>
+        </div>
+      `;
+      employeeList.appendChild(row);
+    });
+
+    document.querySelectorAll(".delete-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (busy) return;
+        const idx = parseInt(btn.dataset.index, 10);
+        const name = currentEmployees[idx];
+        if (!confirm(`متأكد إنك عايز تمسح "${name}"؟ (هيتم مسح الباسورد بتاعه كمان)`)) return;
+
+        setBusy(true);
+        const backup = [...currentEmployees];
+        currentEmployees.splice(idx, 1);
+        renderList();
+        const ok = await saveEmployees(true);
+        if (!ok) {
+          // فشل الحفظ، رجّع القائمة زي ما كانت
+          currentEmployees = backup;
+          renderList();
+          setBusy(false);
+          return;
+        }
+        try {
+          await deleteDoc(doc(db, AUTH_COLLECTION, name));
+        } catch (err) {
+          logDebug("تعذر مسح بيانات الدخول: " + err.code + " — " + err.message);
+        }
+        setBusy(false);
+      });
+    });
+
+    document.querySelectorAll(".reset-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (busy) return;
+        const idx = parseInt(btn.dataset.index, 10);
+        const name = currentEmployees[idx];
+        if (!confirm(`تصفير باسورد "${name}"؟ هيقدر يعمل باسورد جديد أول ما يدخل تاني.`)) return;
+        setBusy(true);
+        try {
+          await deleteDoc(doc(db, AUTH_COLLECTION, name));
+          showStatus(`تم تصفير باسورد ${name}`, "success");
+        } catch (err) {
+          console.error(err);
+          logDebug("خطأ تصفير الباسورد: " + err.code + " — " + err.message);
+          showStatus("حصل خطأ: " + err.message, "error");
+        }
+        setBusy(false);
+      });
+    });
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  async function addEmployee() {
+    if (busy) return;
+    const name = newNameInput.value.trim();
+    if (!name) return;
+    if (currentEmployees.includes(name)) {
+      showStatus("الاسم ده موجود بالفعل", "error");
+      return;
+    }
+    setBusy(true);
+    const backup = [...currentEmployees];
+    currentEmployees.push(name);
+    newNameInput.value = "";
+    renderList();
+    const ok = await saveEmployees(true);
+    if (!ok) {
+      currentEmployees = backup;
+      renderList();
+    }
+    setBusy(false);
+  }
+
+  async function saveEmployees(showMessage) {
+    try {
+      await setDoc(CONFIG_DOC, { names: currentEmployees, updatedAt: new Date().toISOString() });
+      if (showMessage) showStatus("تم الحفظ بنجاح", "success");
+      return true;
+    } catch (err) {
+      console.error(err);
+      logDebug("خطأ أثناء الحفظ: " + (err.code || "") + " — " + err.message);
+      if (showMessage) showStatus("حصل خطأ في الحفظ: " + err.message, "error");
+      return false;
+    }
+  }
+
+  function showStatus(message, kind) {
+    saveStatus.textContent = message;
+    saveStatus.className = "save-status show " + kind;
+    setTimeout(() => saveStatus.classList.remove("show"), 4000);
+  }
+
+  addBtn.addEventListener("click", addEmployee);
+  newNameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addEmployee();
+  });
+</script>
 
 <script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(console.error);
-  });
-}
+  // إلغاء تسجيل أي Service Worker قديم لتفادي مشاكل الكاش على صفحة الأدمن تحديدًا
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations().then(regs => {
+      regs.forEach(reg => reg.update());
+    });
+  }
 </script>
 </body>
 </html>
