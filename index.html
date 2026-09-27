@@ -236,7 +236,7 @@
       const labels = {
         check_in: "حضور",
         check_out: "انصراف",
-        leave: "إجازة اليوم",
+        leave: "إجازة",
         permission: "استئذان",
         delay: "تأخير"
       };
@@ -282,7 +282,9 @@
       const labels = {
         check_in: "حضور",
         check_out: "انصراف",
-        leave: "إجازة",
+        leave: data.leaveFrom && data.leaveTo && data.leaveFrom !== data.leaveTo
+          ? `إجازة من ${data.leaveFrom} إلى ${data.leaveTo}`
+          : `إجازة يوم ${data.leaveFrom || ""}`,
         permission: data.durationMinutes === "no_return"
           ? "استئذان بدون عودة"
           : `استئذان (${data.durationMinutes} دقيقة)`
@@ -343,19 +345,88 @@
 
 
   // ---------------------------------------------------------------
-  // زرار الإجازة
+  // زرار الإجازة + نافذة اختيار التاريخ (من - إلى)
   // ---------------------------------------------------------------
   const leaveBtn = document.getElementById("leaveBtn");
-  leaveBtn.addEventListener("click", async () => {
+  const leaveModal = document.getElementById("leaveModal");
+  const leaveFromInput = document.getElementById("leaveFromInput");
+  const leaveToInput = document.getElementById("leaveToInput");
+  const leaveSaveBtn = document.getElementById("leaveSaveBtn");
+  const leaveCancelBtn = document.getElementById("leaveCancelBtn");
+  const leaveError = document.getElementById("leaveError");
+
+  // أقل تاريخ متاح = بكرة (بتوقيت جهاز الموظف)
+  function getTomorrowISO() {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  leaveBtn.addEventListener("click", () => {
     const employee = employeeSelect.value;
     if (!employee) {
       setStatus("اختر اسمك الأول من القائمة", "error");
       return;
     }
-    if (!confirm(`تسجيل إجازة اليوم لـ "${employee}"؟`)) return;
-    leaveBtn.disabled = true;
-    await recordEvent("leave");
-    leaveBtn.disabled = false;
+    const minDate = getTomorrowISO();
+    leaveFromInput.min = minDate;
+    leaveToInput.min = minDate;
+    leaveFromInput.value = minDate;
+    leaveToInput.value = minDate;
+    leaveError.textContent = "";
+    leaveModal.classList.add("show");
+  });
+
+  leaveCancelBtn.addEventListener("click", () => {
+    leaveModal.classList.remove("show");
+  });
+
+  leaveModal.addEventListener("click", (e) => {
+    if (e.target === leaveModal) leaveModal.classList.remove("show");
+  });
+
+  // لما يغيّر "من"، خلي "إلى" ميقلش عنها
+  leaveFromInput.addEventListener("change", () => {
+    if (leaveFromInput.value) {
+      leaveToInput.min = leaveFromInput.value;
+      if (leaveToInput.value && leaveToInput.value < leaveFromInput.value) {
+        leaveToInput.value = leaveFromInput.value;
+      }
+    }
+  });
+
+  leaveSaveBtn.addEventListener("click", async () => {
+    const employee = employeeSelect.value;
+    if (!employee) {
+      setStatus("اختر اسمك الأول من القائمة", "error");
+      leaveModal.classList.remove("show");
+      return;
+    }
+
+    const from = leaveFromInput.value;
+    const to = leaveToInput.value;
+    const minDate = getTomorrowISO();
+
+    if (!from || !to) {
+      leaveError.textContent = "اختر تاريخ البداية والنهاية.";
+      return;
+    }
+    if (from < minDate) {
+      leaveError.textContent = "لا يمكن أخذ إجازة في نفس اليوم أو تاريخ فات. أقل تاريخ متاح هو بكرة.";
+      return;
+    }
+    if (to < from) {
+      leaveError.textContent = "تاريخ النهاية لازم يكون بعد أو يساوي تاريخ البداية.";
+      return;
+    }
+
+    leaveSaveBtn.disabled = true;
+    await recordEvent("leave", { leaveFrom: from, leaveTo: to });
+    leaveSaveBtn.disabled = false;
+    leaveModal.classList.remove("show");
   });
 
   // ---------------------------------------------------------------
@@ -660,6 +731,7 @@
     border-radius: 12px;
     margin-bottom: 4px;
   }
+
   #loginPasswordInput:focus { outline: none; border-color: var(--sage); }
 
   .login-hint {
@@ -677,6 +749,7 @@
     opacity: 0;
     transition: opacity 0.2s;
   }
+
   .error-msg.show { opacity: 1; }
 
   .logged-in-row {
@@ -703,6 +776,7 @@
     white-space: nowrap;
     flex-shrink: 0;
   }
+
   .logout-btn:hover { border-color: var(--clay); color: var(--clay-bright); }
 
   @media (prefers-reduced-motion: reduce) {
@@ -781,9 +855,44 @@
     color: var(--paper-dim);
     cursor: pointer;
   }
-  button.modal-cancel:hover { color: var(--paper); }
-</style>
 
+  button.modal-cancel:hover { color: var(--paper); }
+
+  /* ===================== نافذة اختيار تاريخ الإجازة ===================== */
+  .leave-field {
+    margin-bottom: 12px;
+  }
+
+  .leave-field label {
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+
+  .leave-field input[type="date"] {
+    width: 100%;
+    padding: 12px 14px;
+    font-size: 16px;
+    font-family: inherit;
+    font-weight: 700;
+    color: var(--paper);
+    background: var(--surface-raised);
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+    color-scheme: dark;
+  }
+
+  .leave-field input[type="date"]:focus {
+    outline: none;
+    border-color: var(--sage);
+  }
+
+  .leave-note {
+    font-size: 12px;
+    color: var(--paper-dim);
+    margin: 0 0 14px;
+    line-height: 1.6;
+  }
+</style>
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#2563eb">
 <meta name="mobile-web-app-capable" content="yes">
@@ -793,102 +902,129 @@
 </head>
 <body>
 
-  <!-- شاشة تسجيل الدخول -->
-  <div class="card" id="loginScreen">
-    <div class="eyebrow">
-      <span class="farm-name">تعليمات الترعة</span>
-      <span class="clock" id="clock">--:--:--</span>
-    </div>
-    <div class="date-line" id="dateLine"></div>
+<!-- شاشة تسجيل الدخول -->
+<div class="card" id="loginScreen">
+  <div class="eyebrow">
+    <span class="farm-name">تعليمات الترعة</span>
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
+  <div class="date-line" id="dateLine"></div>
 
-    <h1>تسجيل الدخول</h1>
+  <h1>تسجيل الدخول</h1>
 
-    <label for="loginNameSelect">اسمك</label>
-    <select id="loginNameSelect">
-      <option value="" disabled selected>اختر اسمك من القائمة</option>
-    </select>
+  <label for="loginNameSelect">اسمك</label>
+  <select id="loginNameSelect">
+    <option value="" disabled selected>اختر اسمك من القائمة</option>
+  </select>
 
-    <div class="login-mode-label" id="loginModeLabel"></div>
+  <div class="login-mode-label" id="loginModeLabel"></div>
 
-    <label for="loginPasswordInput" class="password-label">الباسورد</label>
-    <input type="password" id="loginPasswordInput" placeholder="اكتب الباسورد بتاعك" autocomplete="off">
-    <div class="login-hint" id="loginHint"></div>
-    <div class="error-msg" id="loginError"></div>
+  <label for="loginPasswordInput" class="password-label">الباسورد</label>
+  <input type="password" id="loginPasswordInput" placeholder="اكتب الباسورد بتاعك" autocomplete="off">
+  <div class="login-hint" id="loginHint"></div>
 
-    <button class="action" id="loginSubmitBtn" style="width:100%; margin-top: 14px;">دخول</button>
+  <div class="error-msg" id="loginError"></div>
 
-    <div class="footer-note">
-      أول مرة تدخل بيها، اختار أي باسورد وهيتسجل لك تلقائيًا
-    </div>
+  <button class="action" id="loginSubmitBtn" style="width:100%; margin-top: 14px;">دخول</button>
+
+  <div class="footer-note">
+    أول مرة تدخل بيها، اختار أي باسورد وهيتسجل لك تلقائيًا
+  </div>
+</div>
+
+<!-- الصفحة الرئيسية بعد تسجيل الدخول -->
+<div class="card" id="mainCard" style="display:none;">
+  <div class="eyebrow">
+    <span class="farm-name">تعليمات الترعة</span>
+    <span class="clock" id="clockMain">--:--:--</span>
+  </div>
+  <div class="date-line" id="dateLineMain"></div>
+
+  <div class="logged-in-row">
+    <h1 id="welcomeText">سجّل حضورك أو انصرافك</h1>
+    <button class="logout-btn" id="logoutBtn">خروج</button>
   </div>
 
-  <!-- الصفحة الرئيسية بعد تسجيل الدخول -->
-  <div class="card" id="mainCard" style="display:none;">
-    <div class="eyebrow">
-      <span class="farm-name">تعليمات الترعة</span>
-      <span class="clock" id="clockMain">--:--:--</span>
-    </div>
-    <div class="date-line" id="dateLineMain"></div>
+  <select id="employeeSelect" style="display:none;"></select>
 
-    <div class="logged-in-row">
-      <h1 id="welcomeText">سجّل حضورك أو انصرافك</h1>
-      <button class="logout-btn" id="logoutBtn">خروج</button>
-    </div>
+  <div class="last-action" id="lastAction"></div>
 
-    <select id="employeeSelect" style="display:none;"></select>
-    <div class="last-action" id="lastAction"></div>
-
-    <div class="buttons">
-      <button class="action" id="checkInBtn">✓ حضور</button>
-      <button class="action" id="checkOutBtn">✕ انصراف</button>
-    </div>
-
-    <div class="secondary-buttons">
-      <button class="action-secondary" id="leaveBtn">🏖 إجازة اليوم</button>
-      <button class="action-secondary" id="permissionBtn">🕐 استئذان</button>
-      <button class="action-secondary" id="delayBtn">⏰ تأخير</button>
-    </div>
-
-    <div class="status" id="status"></div>
-
-    <div class="footer-note">
-      اضغط الزرار المناسب عند بداية أو نهاية يوم عملك فقط
-    </div>
+  <div class="buttons">
+    <button class="action" id="checkInBtn">✓ حضور</button>
+    <button class="action" id="checkOutBtn">✕ انصراف</button>
   </div>
 
-  <!-- نافذة تسجيل التأخير -->
-  <div class="modal-overlay" id="delayModal">
-    <div class="modal-card">
-      <h2>تسجيل التأخير</h2>
-      <p style="margin:0 0 12px;color:#777;">اذكر مدة التأخير المتوقعة بالدقائق. أقل مدة 5 دقائق، وسيتم خصمها من الساعات الفعلية في التقرير.</p>
-      <input id="delayMinutesInput" type="number" min="5" step="1" inputmode="numeric" placeholder="مثال: 15" style="width:100%;padding:13px;border:1px solid #ccc;border-radius:10px;font-size:18px;text-align:center;box-sizing:border-box;">
-      <div id="delayError" style="color:#c0392b;font-size:13px;margin-top:8px;min-height:20px;"></div>
-      <button class="modal-option" id="delaySaveBtn">حفظ التأخير</button>
-      <button class="modal-cancel" id="delayCancelBtn">إلغاء</button>
-    </div>
+  <div class="secondary-buttons">
+    <button class="action-secondary" id="leaveBtn">🏖 إجازة اليوم</button>
+    <button class="action-secondary" id="permissionBtn">🕐 استئذان</button>
+    <button class="action-secondary" id="delayBtn">⏰ تأخير</button>
   </div>
 
-  <!-- نافذة اختيار نوع الاستئذان -->
-  <div class="modal-overlay" id="permissionModal">
-    <div class="modal-card">
-      <h2>نوع الاستئذان</h2>
-      <div class="modal-options">
-        <button class="modal-option" data-duration="no_return">استئذان بدون عودة</button>
-        <button class="modal-option" data-duration="30">نص ساعة (30 دقيقة)</button>
-        <button class="modal-option" data-duration="60">ساعة</button>
-        <button class="modal-option" data-duration="120">ساعتين</button>
-      </div>
-      <button class="modal-cancel" id="modalCancelBtn">إلغاء</button>
-    </div>
-  </div>
+  <div class="status" id="status"></div>
 
+  <div class="footer-note">
+    اضغط الزرار المناسب عند بداية أو نهاية يوم عملك فقط
+  </div>
+</div>
+
+<!-- نافذة تسجيل التأخير -->
+<div class="modal-overlay" id="delayModal">
+  <div class="modal-card">
+    <h2>تسجيل التأخير</h2>
+    <p style="margin:0 0 12px;color:#777;">اذكر مدة التأخير المتوقعة بالدقائق. أقل مدة 5 دقائق، وسيتم خصمها من الساعات الفعلية في التقرير.</p>
+    <input id="delayMinutesInput" type="number" min="5" step="1" inputmode="numeric" placeholder="مثال: 15" style="width:100%;padding:13px;border:1px solid #ccc;border-radius:10px;font-size:18px;text-align:center;box-sizing:border-box;">
+    <div id="delayError" style="color:#c0392b;font-size:13px;margin-top:8px;min-height:20px;"></div>
+    <button class="modal-option" id="delaySaveBtn">حفظ التأخير</button>
+    <button class="modal-cancel" id="delayCancelBtn">إلغاء</button>
+  </div>
+</div>
+
+<!-- نافذة اختيار نوع الاستئذان -->
+<div class="modal-overlay" id="permissionModal">
+  <div class="modal-card">
+    <h2>نوع الاستئذان</h2>
+    <div class="modal-options">
+      <button class="modal-option" data-duration="no_return">استئذان بدون عودة</button>
+      <button class="modal-option" data-duration="30">نص ساعة (30 دقيقة)</button>
+      <button class="modal-option" data-duration="60">ساعة</button>
+      <button class="modal-option" data-duration="120">ساعتين</button>
+    </div>
+    <button class="modal-cancel" id="modalCancelBtn">إلغاء</button>
+  </div>
+</div>
+
+<!-- نافذة اختيار تاريخ الإجازة -->
+<div class="modal-overlay" id="leaveModal">
+  <div class="modal-card">
+    <h2>تسجيل إجازة</h2>
+    <p class="leave-note">اختر تاريخ بداية ونهاية الإجازة. لا يمكن أخذ إجازة في نفس اليوم، أقل تاريخ متاح هو بكرة.</p>
+
+    <div class="leave-field">
+      <label for="leaveFromInput">من تاريخ</label>
+      <input type="date" id="leaveFromInput">
+    </div>
+
+    <div class="leave-field">
+      <label for="leaveToInput">إلى تاريخ</label>
+      <input type="date" id="leaveToInput">
+    </div>
+
+    <div id="leaveError" style="color:#c0392b;font-size:13px;margin-bottom:10px;min-height:20px;"></div>
+
+    <button class="modal-option" id="leaveSaveBtn">حفظ الإجازة</button>
+    <button class="modal-cancel" id="leaveCancelBtn">إلغاء</button>
+  </div>
+</div>
 
 <script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(console.error);
-  });
-}
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(() => {
+        // لو الملف مش موجود (زي بيئة المعاينة) نتجاهل بهدوء
+      });
+    });
+  }
 </script>
+
 </body>
 </html>
