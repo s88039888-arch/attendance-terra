@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>تسجيل الحضور — تعليمات الترعة</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getFirestore, collection, addDoc, query, where, orderBy, limit,
+    getDocs, serverTimestamp, Timestamp, doc, getDoc, setDoc
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  // ============================================================
+  // ⚠️ عدّل الإعدادات دي بقيم مشروع Firebase بتاعك (من لوحة تحكم Firebase)
+  // ============================================================
+  const firebaseConfig = {
+    apiKey: "AIzaSyBGSGTSL-lVdx54BIECEbbVljXuqCjuu_4",
+    authDomain: "attendance-terra.firebaseapp.com",
+    projectId: "attendance-terra",
+    storageBucket: "attendance-terra.firebasestorage.app",
+    messagingSenderId: "403868956775",
+    appId: "1:403868956775:web:1cefb35a53c72033057cc2"
+  };
+
+  // قائمة موظفين احتياطية (تُستخدم فقط لو فشل تحميل القائمة من قاعدة البيانات)
+  const FALLBACK_EMPLOYEES = [
+    "يويو", "Hagoraa", "Nermin", "Y", "eldeeb", "اسلام الشربيني", "جمعه انور محمد"
+  ];
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const EVENTS_COLLECTION = "attendance_events";
+  const CONFIG_DOC = doc(db, "app_config", "employees");
+  const AUTH_COLLECTION = "employee_auth"; // كل مستند فيه: passwordHash
+
+  // ---------------------------------------------------------------
+  // تشفير بسيط للباسورد (SHA-256) — مايُخزّنش الباسورد نفسه أبدًا
+  // ---------------------------------------------------------------
+  async function hashPassword(password) {
+    const data = new TextEncoder().encode(password);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // ---------------------------------------------------------------
+  // تحميل قائمة الموظفين من قاعدة البيانات (تُدار من صفحة admin.html)
+  // ---------------------------------------------------------------
+  const employeeSelect = document.getElementById("employeeSelect");
+  const loginNameSelect = document.getElementById("loginNameSelect");
+
+  let employeeNames = FALLBACK_EMPLOYEES;
+
+  async function loadEmployeeList() {
+    let names = FALLBACK_EMPLOYEES;
+    try {
+      const snap = await getDoc(CONFIG_DOC);
+      if (snap.exists() && Array.isArray(snap.data().names) && snap.data().names.length > 0) {
+        names = snap.data().names;
+      }
+    } catch (err) {
+      console.error("تعذر تحميل قائمة الموظفين، سيتم استخدام القائمة الاحتياطية", err);
+    }
+    employeeNames = names;
+
+    [employeeSelect, loginNameSelect].forEach((select) => {
+      if (!select) return;
+      select.innerHTML = `<option value="" disabled selected>اختر اسمك من القائمة</option>`;
+      names.forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // شاشة الدخول: تسجيل دخول بباسورد، أو إنشاء باسورد أول مرة
+  // ---------------------------------------------------------------
+  const loginScreen = document.getElementById("loginScreen");
+  const mainCard = document.getElementById("mainCard");
+  const loginPasswordInput = document.getElementById("loginPasswordInput");
+  const loginSubmitBtn = document.getElementById("loginSubmitBtn");
+  const loginError = document.getElementById("loginError");
+  const loginModeLabel = document.getElementById("loginModeLabel");
+  const loginHint = document.getElementById("loginHint");
+
+  const LOGGED_IN_KEY = "loggedInEmployee";
+
+  async function checkEmployeeHasPassword(name) {
+    const snap = await getDoc(doc(db, AUTH_COLLECTION, name));
+    return snap.exists() && !!snap.data().passwordHash;
+  }
+
+  async function refreshLoginMode() {
+    const name = loginNameSelect.value;
+    loginError.classList.remove("show");
+    if (!name) {
+      loginModeLabel.textContent = "";
+      loginHint.textContent = "";
+      return;
+    }
+    loginSubmitBtn.disabled = true;
+    loginModeLabel.textContent = "جاري التحقق...";
+    const hasPassword = await checkEmployeeHasPassword(name);
+    loginSubmitBtn.disabled = false;
+    if (hasPassword) {
+      loginModeLabel.textContent = `تسجيل دخول: ${name}`;
+      loginHint.textContent = "ادخل الباسورد بتاعك";
+      loginSubmitBtn.textContent = "دخول";
+    } else {
+      loginModeLabel.textContent = `أول مرة يا ${name}؟`;
+      loginHint.textContent = "اختر باسورد جديد لنفسك (هتستخدمه في كل مرة بعد كده)";
+      loginSubmitBtn.textContent = "إنشاء الباسورد والدخول";
+    }
+  }
+
+  async function handleLoginSubmit() {
+    const name = loginNameSelect.value;
+    const password = loginPasswordInput.value;
+
+    if (!name) {
+      showLoginError("اختر اسمك الأول");
+      return;
+    }
+    if (!password || password.length < 4) {
+      showLoginError("الباسورد لازم يكون 4 أحرف/أرقام على الأقل");
+      return;
+    }
+
+    loginSubmitBtn.disabled = true;
+    const originalText = loginSubmitBtn.textContent;
+    loginSubmitBtn.textContent = "جاري التحقق...";
+
+    try {
+      const authDocRef = doc(db, AUTH_COLLECTION, name);
+      const snap = await getDoc(authDocRef);
+      const hash = await hashPassword(password);
+
+      if (snap.exists() && snap.data().passwordHash) {
+        // تسجيل دخول عادي
+        if (snap.data().passwordHash !== hash) {
+          showLoginError("الباسورد غلط، حاول تاني");
+          loginSubmitBtn.disabled = false;
+          loginSubmitBtn.textContent = originalText;
+          return;
+        }
+      } else {
+        // أول مرة: إنشاء الباسورد
+        await setDoc(authDocRef, { passwordHash: hash, createdAt: new Date().toISOString() });
+      }
+
+      completeLogin(name);
+    } catch (err) {
+      console.error(err);
+      showLoginError("حصل خطأ، تأكد من الاتصال بالإنترنت وحاول تاني");
+      loginSubmitBtn.disabled = false;
+      loginSubmitBtn.textContent = originalText;
+    }
+  }
+
+  function showLoginError(message) {
+    loginError.textContent = message;
+    loginError.classList.add("show");
+  }
+
+  function completeLogin(name) {
+    localStorage.setItem(LOGGED_IN_KEY, name);
+    loginScreen.style.display = "none";
+    mainCard.style.display = "block";
+    employeeSelect.innerHTML = `<option value="${name}" selected>${name}</option>`;
+    employeeSelect.value = name;
+    document.getElementById("welcomeText").textContent = `أهلاً ${name} 👋`;
+    loadLastAction(name);
+  }
+
+  function logout() {
+    localStorage.removeItem(LOGGED_IN_KEY);
+    loginPasswordInput.value = "";
+    loginNameSelect.value = "";
+    loginModeLabel.textContent = "";
+    loginHint.textContent = "";
+    mainCard.style.display = "none";
+    loginScreen.style.display = "flex";
+  }
+
+  loginNameSelect.addEventListener("change", refreshLoginMode);
+  loginSubmitBtn.addEventListener("click", handleLoginSubmit);
+  loginPasswordInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") handleLoginSubmit();
+  });
+
+  const statusEl = document.getElementById("status");
+  const checkInBtn = document.getElementById("checkInBtn");
+  const checkOutBtn = document.getElementById("checkOutBtn");
+  const lastActionEl = document.getElementById("lastAction");
+
+  function setStatus(message, kind) {
+    statusEl.textContent = message;
+    statusEl.className = "status " + (kind || "");
+    statusEl.classList.add("show");
+    setTimeout(() => statusEl.classList.remove("show"), 3500);
+  }
+
+  function formatTime(date) {
+    return date.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function formatDate(date) {
+    return date.toLocaleDateString("ar-EG", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  }
+
+  async function recordEvent(type, extra) {
+    const employee = employeeSelect.value;
+    if (!employee) {
+      setStatus("اختر اسمك الأول من القائمة", "error");
+      return;
+    }
+
+    localStorage.setItem("lastEmployee", employee);
+
+    try {
+      await addDoc(collection(db, EVENTS_COLLECTION), {
+        employeeName: employee,
+        type: type,
+        timestamp: serverTimestamp(),
+        clientTime: new Date().toISOString(),
+        ...(extra || {})
+      });
+
+      const labels = {
+        check_in: "حضور",
+        check_out: "انصراف",
+        leave: "إجازة اليوم",
+        permission: "استئذان",
+        delay: "تأخير"
+      };
+      const label = labels[type] || type;
+      setStatus(`تم تسجيل ${label} بنجاح — ${formatTime(new Date())}`, "success");
+      await loadLastAction(employee);
+    } catch (err) {
+      console.error(err);
+      setStatus("حصل خطأ، حاول تاني (تأكد من الاتصال بالإنترنت)", "error");
+    }
+  }
+
+  async function recordCheckInOut(type) {
+    const btn = type === "check_in" ? checkInBtn : checkOutBtn;
+    const originalText = btn.textContent;
+    checkInBtn.disabled = true;
+    checkOutBtn.disabled = true;
+    btn.textContent = "جاري التسجيل...";
+    await recordEvent(type);
+    btn.textContent = originalText;
+    checkInBtn.disabled = false;
+    checkOutBtn.disabled = false;
+  }
+
+  async function loadLastAction(employee) {
+    if (!employee) {
+      lastActionEl.textContent = "";
+      return;
+    }
+    try {
+      const q = query(
+        collection(db, EVENTS_COLLECTION),
+        where("employeeName", "==", employee),
+        orderBy("timestamp", "desc"),
+        limit(1)
+      );
+      const snap = await getDocs(q);
+      if (snap.empty) {
+        lastActionEl.textContent = "لا يوجد تسجيل سابق";
+        return;
+      }
+      const data = snap.docs[0].data();
+      const labels = {
+        check_in: "حضور",
+        check_out: "انصراف",
+        leave: "إجازة",
+        permission: data.durationMinutes === "no_return"
+          ? "استئذان بدون عودة"
+          : `استئذان (${data.durationMinutes} دقيقة)`
+      };
+      const label = labels[data.type] || data.type;
+      const ts = data.timestamp ? data.timestamp.toDate() : new Date(data.clientTime);
+      lastActionEl.textContent = `آخر تسجيل: ${label} — ${formatTime(ts)}`;
+    } catch (err) {
+      console.error(err);
+      lastActionEl.textContent = "";
+    }
+  }
+
+  checkInBtn.addEventListener("click", () => recordCheckInOut("check_in"));
+  checkOutBtn.addEventListener("click", () => recordCheckInOut("check_out"));
+
+  // ---------------------------------------------------------------
+  // زرار التأخير: الموظف يحدد مدة التأخير المتوقعة (من 5 دقائق فأكثر)
+  // ---------------------------------------------------------------
+  const delayBtn = document.getElementById("delayBtn");
+  const delayModal = document.getElementById("delayModal");
+  const delayMinutesInput = document.getElementById("delayMinutesInput");
+  const delaySaveBtn = document.getElementById("delaySaveBtn");
+  const delayCancelBtn = document.getElementById("delayCancelBtn");
+  const delayError = document.getElementById("delayError");
+
+  delayBtn.addEventListener("click", () => {
+    const employee = employeeSelect.value;
+    if (!employee) {
+      setStatus("اختر اسمك الأول من القائمة", "error");
+      return;
+    }
+    delayMinutesInput.value = "";
+    delayError.textContent = "";
+    delayModal.classList.add("show");
+    setTimeout(() => delayMinutesInput.focus(), 50);
+  });
+
+  delayCancelBtn.addEventListener("click", () => {
+    delayModal.classList.remove("show");
+  });
+
+  delayModal.addEventListener("click", (e) => {
+    if (e.target === delayModal) delayModal.classList.remove("show");
+  });
+
+  delaySaveBtn.addEventListener("click", async () => {
+    const minutes = Number.parseInt(delayMinutesInput.value, 10);
+    if (!Number.isInteger(minutes) || minutes < 5) {
+      delayError.textContent = "اكتب مدة التأخير بالدقائق، بحد أدنى 5 دقائق.";
+      return;
+    }
+    delaySaveBtn.disabled = true;
+    await recordEvent("delay", { delayMinutes: minutes });
+    delaySaveBtn.disabled = false;
+    delayModal.classList.remove("show");
+  });
+
+
+  // ---------------------------------------------------------------
+  // زرار الإجازة
+  // ---------------------------------------------------------------
+  const leaveBtn = document.getElementById("leaveBtn");
+  leaveBtn.addEventListener("click", async () => {
+    const employee = employeeSelect.value;
+    if (!employee) {
+      setStatus("اختر اسمك الأول من القائمة", "error");
+      return;
+    }
+    if (!confirm(`تسجيل إجازة اليوم لـ "${employee}"؟`)) return;
+    leaveBtn.disabled = true;
+    await recordEvent("leave");
+    leaveBtn.disabled = false;
+  });
+
+  // ---------------------------------------------------------------
+  // زرار الاستئذان + نافذة اختيار المدة
+  // ---------------------------------------------------------------
+  const permissionBtn = document.getElementById("permissionBtn");
+  const permissionModal = document.getElementById("permissionModal");
+  const modalCancelBtn = document.getElementById("modalCancelBtn");
+
+  permissionBtn.addEventListener("click", () => {
+    const employee = employeeSelect.value;
+    if (!employee) {
+      setStatus("اختر اسمك الأول من القائمة", "error");
+      return;
+    }
+    permissionModal.classList.add("show");
+  });
+
+  modalCancelBtn.addEventListener("click", () => {
+    permissionModal.classList.remove("show");
+  });
+
+  permissionModal.addEventListener("click", (e) => {
+    if (e.target === permissionModal) permissionModal.classList.remove("show");
+  });
+
+  document.querySelectorAll(".modal-option").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const duration = btn.dataset.duration; // "no_return" أو عدد الدقائق كنص
+      permissionModal.classList.remove("show");
+      await recordEvent("permission", { durationMinutes: duration });
+    });
+  });
+
+  // ---------------------------------------------------------------
+  // زرار الخروج
+  // ---------------------------------------------------------------
+  document.getElementById("logoutBtn").addEventListener("click", logout);
+
+  // ---------------------------------------------------------------
+  // زرار إعدادات الأدمن: يفتح نافذة فيها روابط التقرير وإدارة الموظفين
+  // ---------------------------------------------------------------
+  const adminBtn = document.getElementById("adminBtn");
+  const adminBtnLogin = document.getElementById("adminBtnLogin");
+  const adminModal = document.getElementById("adminModal");
+  const adminModalCancelBtn = document.getElementById("adminModalCancelBtn");
+
+  adminBtn.addEventListener("click", () => {
+    adminModal.classList.add("show");
+  });
+
+  adminBtnLogin.addEventListener("click", () => {
+    adminModal.classList.add("show");
+  });
+
+  adminModalCancelBtn.addEventListener("click", () => {
+    adminModal.classList.remove("show");
+  });
+
+  adminModal.addEventListener("click", (e) => {
+    if (e.target === adminModal) adminModal.classList.remove("show");
+  });
+
+  // ---------------------------------------------------------------
+  // تشغيل أولي: تحميل الموظفين، ومحاولة استرجاع جلسة سابقة
+  // ---------------------------------------------------------------
+  async function init() {
+    await loadEmployeeList();
+
+    const savedName = localStorage.getItem(LOGGED_IN_KEY);
+    if (savedName && employeeNames.includes(savedName)) {
+      // في وضع "تذكرني" البسيط ده، مجرد وجود الاسم محفوظ كفاية لإعادة الدخول
+      // على نفس الجهاز (الباسورد اتأكد منه أول مرة سجل فيها دخول)
+      completeLogin(savedName);
+    }
+  }
+  init();
+
+  // تحديث الساعة والتاريخ الحي (في الشاشتين)
+  const clockEls = [document.getElementById("clock"), document.getElementById("clockMain")];
+  const dateLineEls = [document.getElementById("dateLine"), document.getElementById("dateLineMain")];
+  function tickClock() {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const dateStr = formatDate(now);
+    clockEls.forEach((el) => { if (el) el.textContent = timeStr; });
+    dateLineEls.forEach((el) => { if (el) el.textContent = dateStr; });
+  }
+  tickClock();
+  setInterval(tickClock, 1000);
+</script>
+
+<style>
+  :root {
+    --bg: #1f2a24;
+    --surface: #2a362e;
+    --surface-raised: #344139;
+    --paper: #f5f1e8;
+    --paper-dim: #cfc9b8;
+    --sage: #8fa876;
+    --sage-bright: #a4c187;
+    --clay: #c97b5b;
+    --clay-bright: #db8d6c;
+    --line: #3f4d43;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--paper);
+    font-family: "Cairo", "Segoe UI", sans-serif;
+  }
+
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+    background-image:
+      radial-gradient(circle at 15% 10%, rgba(143,168,118,0.08), transparent 40%),
+      radial-gradient(circle at 85% 90%, rgba(201,123,91,0.07), transparent 45%);
+  }
+
+  .card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 32px 24px 28px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  }
+
+  .eyebrow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  .eyebrow .farm-name {
+    font-size: 14px;
+    color: var(--sage-bright);
+    font-weight: 600;
+  }
+
+  .eyebrow .clock {
+    font-size: 14px;
+    color: var(--paper-dim);
+    font-variant-numeric: tabular-nums;
+    direction: ltr;
+  }
+
+  .date-line {
+    font-size: 13px;
+    color: var(--paper-dim);
+    margin-top: 2px;
+    margin-bottom: 4px;
+  }
+
+  h1 {
+    font-size: 26px;
+    font-weight: 800;
+    margin: 12px 0 28px;
+    line-height: 1.3;
+  }
+
+  label {
+    display: block;
+    font-size: 14px;
+    color: var(--paper-dim);
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+
+  select {
+    width: 100%;
+    padding: 14px 16px;
+    font-size: 17px;
+    font-family: inherit;
+    font-weight: 700;
+    color: var(--paper);
+    background: var(--surface-raised);
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+    margin-bottom: 6px;
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23cfc9b8' stroke-width='2.5'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat: no-repeat;
+    background-position: left 14px center;
+  }
+
+  select:focus {
+    outline: none;
+    border-color: var(--sage);
+  }
+
+  .last-action {
+    font-size: 13px;
+    color: var(--paper-dim);
+    min-height: 18px;
+    margin-bottom: 22px;
+  }
+
+  .buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  button.action {
+    font-family: inherit;
+    font-size: 18px;
+    font-weight: 800;
+    padding: 20px 8px;
+    border-radius: 14px;
+    border: none;
+    cursor: pointer;
+    transition: transform 0.12s ease, filter 0.12s ease;
+  }
+
+  button.action:active {
+    transform: scale(0.96);
+  }
+
+  button.action:disabled {
+    opacity: 0.6;
+    cursor: default;
+    transform: none;
+  }
+
+  #checkInBtn {
+    background: var(--sage);
+    color: #16201a;
+  }
+
+  #checkInBtn:hover:not(:disabled) { filter: brightness(1.08); }
+
+  #checkOutBtn {
+    background: var(--clay);
+    color: #241209;
+  }
+
+  #checkOutBtn:hover:not(:disabled) { filter: brightness(1.08); }
+
+  .secondary-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 10px;
+  }
+
+  button.action-secondary {
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 13px 8px;
+    border-radius: 12px;
+    border: 1.5px solid var(--line);
+    background: transparent;
+    color: var(--paper-dim);
+    cursor: pointer;
+    transition: transform 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  }
+
+  button.action-secondary:active { transform: scale(0.96); }
+  button.action-secondary:hover { border-color: var(--sage); color: var(--sage-bright); }
+
+  .status {
+    margin-top: 18px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 700;
+    text-align: center;
+    opacity: 0;
+    max-height: 0;
+    overflow: hidden;
+    transition: opacity 0.25s ease, max-height 0.25s ease, padding 0.25s ease, margin 0.25s ease;
+  }
+
+  .status.show {
+    opacity: 1;
+    max-height: 60px;
+    margin-top: 18px;
+  }
+
+  .status.success { background: rgba(143,168,118,0.18); color: var(--sage-bright); }
+  .status.error { background: rgba(201,123,91,0.18); color: var(--clay-bright); }
+
+  .footer-note {
+    margin-top: 24px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--paper-dim);
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  /* ===================== شاشة تسجيل الدخول ===================== */
+  .login-mode-label {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--sage-bright);
+    min-height: 18px;
+    margin: 10px 0 2px;
+  }
+
+  .password-label {
+    margin-top: 4px;
+  }
+
+  #loginPasswordInput {
+    width: 100%;
+    padding: 14px 16px;
+    font-size: 17px;
+    font-family: inherit;
+    color: var(--paper);
+    background: var(--surface-raised);
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+    margin-bottom: 4px;
+  }
+
+  #loginPasswordInput:focus { outline: none; border-color: var(--sage); }
+
+  .login-hint {
+    font-size: 12px;
+    color: var(--paper-dim);
+    min-height: 16px;
+    margin-bottom: 4px;
+  }
+
+  .error-msg {
+    color: var(--clay-bright);
+    font-size: 13px;
+    font-weight: 700;
+    min-height: 18px;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  .error-msg.show { opacity: 1; }
+
+  .logged-in-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .logged-in-row h1 {
+    margin: 0 0 20px;
+  }
+
+  .header-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .logout-btn, .admin-btn {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 8px 14px;
+    border-radius: 10px;
+    border: 1.5px solid var(--line);
+    background: transparent;
+    color: var(--paper-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .logout-btn:hover { border-color: var(--clay); color: var(--clay-bright); }
+  .admin-btn:hover { border-color: var(--sage); color: var(--sage-bright); }
+
+  @media (prefers-reduced-motion: reduce) {
+    button.action, .status { transition: none; }
+  }
+
+  /* ===================== نافذة اختيار الاستئذان ===================== */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 20, 17, 0.72);
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 100;
+  }
+
+  .modal-overlay.show {
+    display: flex;
+  }
+
+  .modal-card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 24px 20px;
+  }
+
+  .modal-card h2 {
+    font-size: 18px;
+    font-weight: 800;
+    margin: 0 0 16px;
+    text-align: center;
+  }
+
+  .modal-options {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  button.modal-option {
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 14px 12px;
+    border-radius: 12px;
+    border: 1.5px solid var(--line);
+    background: var(--surface-raised);
+    color: var(--paper);
+    cursor: pointer;
+    transition: border-color 0.12s ease, transform 0.12s ease;
+  }
+
+  button.modal-option:active { transform: scale(0.97); }
+  button.modal-option:hover { border-color: var(--sage); }
+
+  button.modal-option[data-duration="no_return"] {
+    border-color: rgba(201,123,91,0.5);
+    color: var(--clay-bright);
+  }
+
+  a.modal-option {
+    display: block;
+    text-align: center;
+    text-decoration: none;
+    box-sizing: border-box;
+  }
+
+  .modal-card .modal-option-desc {
+    font-size: 12px;
+    color: var(--paper-dim);
+    font-weight: 400;
+    margin-top: 4px;
+    display: block;
+  }
+
+  button.modal-cancel {
+    width: 100%;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 12px;
+    border-radius: 12px;
+    border: none;
+    background: transparent;
+    color: var(--paper-dim);
+    cursor: pointer;
+  }
+
+  button.modal-cancel:hover { color: var(--paper); }
+</style>
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#2563eb">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="الحضور والانصراف">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+</head>
+<body>
+
+<!-- شاشة تسجيل الدخول -->
+<div class="card" id="loginScreen">
+  <div class="eyebrow">
+    <span class="farm-name">تعليمات الترعة</span>
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
+  <div class="date-line" id="dateLine"></div>
+
+  <div class="logged-in-row">
+    <h1>تسجيل الدخول</h1>
+    <div class="header-actions">
+      <button class="admin-btn" id="adminBtnLogin" title="إعدادات الأدمن">⚙️</button>
+    </div>
+  </div>
+
+  <label for="loginNameSelect">اسمك</label>
+  <select id="loginNameSelect">
+    <option value="" disabled selected>اختر اسمك من القائمة</option>
+  </select>
+
+  <div class="login-mode-label" id="loginModeLabel"></div>
+
+  <label for="loginPasswordInput" class="password-label">الباسورد</label>
+  <input type="password" id="loginPasswordInput" placeholder="اكتب الباسورد بتاعك" autocomplete="off">
+  <div class="login-hint" id="loginHint"></div>
+
+  <div class="error-msg" id="loginError"></div>
+
+  <button class="action" id="loginSubmitBtn" style="width:100%; margin-top: 14px;">دخول</button>
+
+  <div class="footer-note">
+    أول مرة تدخل بيها، اختار أي باسورد وهيتسجل لك تلقائيًا
+  </div>
+</div>
+
+<!-- الصفحة الرئيسية بعد تسجيل الدخول -->
+<div class="card" id="mainCard" style="display:none;">
+  <div class="eyebrow">
+    <span class="farm-name">تعليمات الترعة</span>
+    <span class="clock" id="clockMain">--:--:--</span>
+  </div>
+  <div class="date-line" id="dateLineMain"></div>
+
+  <div class="logged-in-row">
+    <h1 id="welcomeText">سجّل حضورك أو انصرافك</h1>
+    <div class="header-actions">
+      <button class="admin-btn" id="adminBtn" title="إعدادات الأدمن">⚙️</button>
+      <button class="logout-btn" id="logoutBtn">خروج</button>
+    </div>
+  </div>
+
+  <select id="employeeSelect" style="display:none;"></select>
+
+  <div class="last-action" id="lastAction"></div>
+
+  <div class="buttons">
+    <button class="action" id="checkInBtn">✓ حضور</button>
+    <button class="action" id="checkOutBtn">✕ انصراف</button>
+  </div>
+
+  <div class="secondary-buttons">
+    <button class="action-secondary" id="leaveBtn">🏖 إجازة اليوم</button>
+    <button class="action-secondary" id="permissionBtn">🕐 استئذان</button>
+    <button class="action-secondary" id="delayBtn">⏰ تأخير</button>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="footer-note">
+    اضغط الزرار المناسب عند بداية أو نهاية يوم عملك فقط
+  </div>
+</div>
+
+<!-- نافذة تسجيل التأخير -->
+<div class="modal-overlay" id="delayModal">
+  <div class="modal-card">
+    <h2>تسجيل التأخير</h2>
+    <p style="margin:0 0 12px;color:#777;">اذكر مدة التأخير المتوقعة بالدقائق. أقل مدة 5 دقائق، وسيتم خصمها من الساعات الفعلية في التقرير.</p>
+    <input id="delayMinutesInput" type="number" min="5" step="1" inputmode="numeric" placeholder="مثال: 15" style="width:100%;padding:13px;border:1px solid #ccc;border-radius:10px;font-size:18px;text-align:center;box-sizing:border-box;">
+    <div id="delayError" style="color:#c0392b;font-size:13px;margin-top:8px;min-height:20px;"></div>
+    <button class="modal-option" id="delaySaveBtn">حفظ التأخير</button>
+    <button class="modal-cancel" id="delayCancelBtn">إلغاء</button>
+  </div>
+</div>
+
+<!-- نافذة اختيار نوع الاستئذان -->
+<div class="modal-overlay" id="permissionModal">
+  <div class="modal-card">
+    <h2>نوع الاستئذان</h2>
+    <div class="modal-options">
+      <button class="modal-option" data-duration="no_return">استئذان بدون عودة</button>
+      <button class="modal-option" data-duration="30">نص ساعة (30 دقيقة)</button>
+      <button class="modal-option" data-duration="60">ساعة</button>
+      <button class="modal-option" data-duration="120">ساعتين</button>
+    </div>
+    <button class="modal-cancel" id="modalCancelBtn">إلغاء</button>
+  </div>
+</div>
+
+<!-- نافذة إعدادات الأدمن: روابط التقرير وإدارة الموظفين -->
+<div class="modal-overlay" id="adminModal">
+  <div class="modal-card">
+    <h2>⚙️ إعدادات الأدمن</h2>
+    <div class="modal-options">
+      <a class="modal-option" href="./report.html">
+        📊 التقرير الأسبوعي
+        <span class="modal-option-desc">مراجعة ساعات العمل والخصومات لكل الموظفين</span>
+      </a>
+      <a class="modal-option" href="./admin.html">
+        🔒 إدارة الموظفين
+        <span class="modal-option-desc">إضافة أو حذف أسماء الموظفين (يتطلب كلمة سر)</span>
+      </a>
+    </div>
+    <button class="modal-cancel" id="adminModalCancelBtn">إلغاء</button>
+  </div>
+</div>
+
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(()=>{});
+    });
+  }
+</script>
+
+</body>
+</html>
